@@ -37,6 +37,10 @@
 - `tauri::path::Error` 在当前版本中不可直接作为公开错误类型使用，配置路径错误应使用 `tauri::Error` 承接。
 - `tauri-plugin-global-shortcut` 的错误类型不能直接用 `?` 转成 `tauri::Error`，当前注册失败时记录错误但不阻塞应用启动。
 - `npm install` 在无输出时仍可能正常下载包；本次首次安装需要等待较久。
+- `async-openai` 0.37 默认只启用 TLS，不会启用 API 分组；使用 chat completions 需要显式开启 `chat-completion` feature。
+- OpenAI-compatible Base URL 应配置为 API base，例如 `https://api.openai.com/v1`；如果用户误填到 `/chat/completions`，当前实现会自动裁剪该后缀。
+- 某些 OpenAI-compatible 服务会返回非标准响应，例如 `message.role` 为空字符串；`async-openai` 的强类型 `CreateChatCompletionResponse` 会因此反序列化失败。当前使用 `byot` feature 让库负责请求与鉴权，但用宽松响应结构只读取 `choices[].message.content`。
+- 使用 `tauri-plugin-log` 写 stdout 和系统日志目录，debug 构建默认 Debug 级别，release 构建默认 Info 级别。日志应避免记录 API Key 和完整原文，只记录长度、路由、模型、Base URL 等必要排障信息。
 
 ## 参考来源
 - Tauri global-shortcut 插件文档：https://v2.tauri.app/zh-cn/plugin/global-shortcut/

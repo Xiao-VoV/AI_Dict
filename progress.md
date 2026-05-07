@@ -13,6 +13,16 @@
 - 执行 `npm audit --audit-level=high`：无 high/critical；存在 Vite/esbuild 开发服务器相关 moderate 提示，修复需要升级到 breaking 版本，暂未自动 force。
 - 修复桌面应用启动 panic：替换无效占位 `src-tauri/icons/icon.png`，解决 Tauri `invalid icon` 错误。
 - 重新验证：`cargo check` 通过，`npm run tauri:dev` 不再出现 icon panic，直接运行 `target/debug/selection-translator` 可进入运行状态。
+- 调整桌面端 UI：禁止窗口级上下左右滚动，首页只保留查询/取词/结果，模型配置拆到独立设置页，通过首页齿轮按钮进入。
+- 重新验证：`npm run build` 通过，`cargo check` 通过。
+- 替换 AI 调用实现：从手写 `reqwest` 请求改为 `async-openai` 的 chat-completion 客户端，支持自定义 OpenAI-compatible Base URL，并自动裁剪误填的 `/chat/completions` 后缀。
+- 增加 AI 设置校验和 Base URL 规范化单元测试；验证 `cargo test` 与 `npm run build` 通过。
+- 修复 DeepSeek-compatible 非标准响应兼容问题：开启 `async-openai` 的 `byot` feature，改用宽松响应解析以接受 `message.role: ""`，新增回归测试覆盖该响应。
+- 重新验证：`cargo test` 通过，`npm run build` 通过。
+- 接入日志体系：新增 `tauri-plugin-log` 与 `log`，日志输出到 stdout 和系统日志目录文件，覆盖启动、快捷键、取词、设置读写、词典/AI 路由、AI 请求与错误等关键路径。
+- 重新验证：`cargo check`、`cargo test`、`npm run build` 通过。
+- 修复前端结果展示：后端 `LookupResult` 使用 `serde(rename_all = "camelCase")`，实际 `kind` 为 `dictionary`、`translation`、`dictionaryMiss`；前端此前判断大写枚举名导致翻译结果不渲染。已统一为 camelCase。
+- 重新验证：`npm run build`、`cargo test` 通过。
 
 ## 待办
 - 运行 `npm run tauri:dev` 做真实桌面取词体验测试。

@@ -1,97 +1,167 @@
 use crate::settings::AppSettings;
-use serde::{Deserialize, Serialize};
+use async_openai::{
+    config::OpenAIConfig,
+    error::OpenAIError,
+    types::chat::{
+        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+        CreateChatCompletionRequestArgs,
+    },
+    Client,
+};
+use serde::Deserialize;
 use tokio::time::{timeout, Duration};
-
-#[derive(Debug, Serialize)]
-struct ChatCompletionRequest {
-    model: String,
-    messages: Vec<ChatMessage>,
-    temperature: f32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: ChatMessage,
-}
 
 pub async fn translate(settings: &AppSettings, text: &str) -> Result<String, AiError> {
     if settings.api_key.trim().is_empty() {
+        log::warn!("AI translation rejected missing API key");
         return Err(AiError::MissingApiKey);
     }
+    if settings.model.trim().is_empty() {
+        log::warn!("AI translation rejected missing model");
+        return Err(AiError::MissingModel);
+    }
 
-    let endpoint = format!(
-        "{}/chat/completions",
-        settings.base_url.trim_end_matches('/')
+    let base_url = normalize_base_url(&settings.base_url);
+    if base_url.is_empty() {
+        log::warn!("AI translation rejected missing base URL");
+        return Err(AiError::MissingBaseUrl);
+    }
+
+    log::debug!(
+        "AI translation request preparing; base_url={} model={} target_language={} source_chars={} temperature={}",
+        base_url,
+        settings.model.trim(),
+        settings.target_language,
+        text.chars().count(),
+        settings.temperature
     );
+
+    let config = OpenAIConfig::new()
+        .with_api_key(settings.api_key.trim())
+        .with_api_base(base_url.clone());
+    let client = Client::with_config(config);
+
     let prompt = format!(
         "请把下面文本翻译成{}。只输出译文，必要时保留专有名词：\n\n{}",
         settings.target_language, text
     );
 
-    let request = ChatCompletionRequest {
-        model: settings.model.clone(),
-        temperature: settings.temperature,
-        messages: vec![
-            ChatMessage {
-                role: "system".to_string(),
-                content: "你是一个准确、简洁的翻译助手。".to_string(),
-            },
-            ChatMessage {
-                role: "user".to_string(),
-                content: prompt,
-            },
-        ],
-    };
+    let request = CreateChatCompletionRequestArgs::default()
+        .model(settings.model.trim())
+        .temperature(settings.temperature)
+        .messages([
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content("你是一个准确、简洁的翻译助手。")
+                .build()?
+                .into(),
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(prompt)
+                .build()?
+                .into(),
+        ])
+        .build()?;
 
-    let client = reqwest::Client::new();
-    let response = timeout(
-        Duration::from_secs(30),
-        client
-            .post(endpoint)
-            .bearer_auth(settings.api_key.trim())
-            .json(&request)
-            .send(),
-    )
-    .await
-    .map_err(|_| AiError::Timeout)??;
+    let response: CompatibleChatCompletionResponse =
+        timeout(Duration::from_secs(30), client.chat().create_byot(request))
+            .await
+            .map_err(|_| {
+                log::warn!(
+                    "AI translation request timed out; base_url={} model={}",
+                    base_url,
+                    settings.model.trim()
+                );
+                AiError::Timeout
+            })?
+            .map_err(|error| {
+                log::warn!(
+                    "AI translation request failed; base_url={} model={} error={error}",
+                    base_url,
+                    settings.model.trim()
+                );
+                error
+            })?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let message = response.text().await.unwrap_or_default();
-        return Err(AiError::HttpStatus(status.as_u16(), message));
-    }
+    let translated = extract_translation(response)?;
+    log::debug!(
+        "AI translation response parsed; translated_chars={}",
+        translated.chars().count()
+    );
+    Ok(translated)
+}
 
-    let completion: ChatCompletionResponse = response.json().await?;
-    completion
+#[derive(Debug, Deserialize)]
+struct CompatibleChatCompletionResponse {
+    choices: Vec<CompatibleChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompatibleChoice {
+    message: CompatibleMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompatibleMessage {
+    content: Option<String>,
+}
+
+fn extract_translation(response: CompatibleChatCompletionResponse) -> Result<String, AiError> {
+    response
         .choices
         .into_iter()
         .next()
-        .map(|choice| choice.message.content.trim().to_string())
+        .and_then(|choice| choice.message.content)
+        .map(|content| content.trim().to_string())
         .filter(|content| !content.is_empty())
         .ok_or(AiError::EmptyResponse)
+}
+
+fn normalize_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    trimmed
+        .strip_suffix("/chat/completions")
+        .unwrap_or(trimmed)
+        .trim_end_matches('/')
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_translation, normalize_base_url, CompatibleChatCompletionResponse};
+
+    #[test]
+    fn strips_chat_completions_endpoint_from_base_url() {
+        assert_eq!(
+            normalize_base_url("https://api.example.com/v1/chat/completions"),
+            "https://api.example.com/v1"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.example.com/v1/"),
+            "https://api.example.com/v1"
+        );
+    }
+
+    #[test]
+    fn accepts_compatible_response_with_empty_role() {
+        let response: CompatibleChatCompletionResponse =
+            serde_json::from_str(r#"{"choices":[{"message":{"role":"","content":"你好，测试"}}]}"#)
+                .unwrap();
+
+        assert_eq!(extract_translation(response).unwrap(), "你好，测试");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum AiError {
     #[error("请先配置 OpenAI-compatible API Key")]
     MissingApiKey,
+    #[error("请先配置模型名称")]
+    MissingModel,
+    #[error("请先配置 API Base URL，例如 https://api.openai.com/v1")]
+    MissingBaseUrl,
     #[error("AI 翻译请求超时")]
     Timeout,
-    #[error("AI 服务返回错误 {0}: {1}")]
-    HttpStatus(u16, String),
     #[error("AI 服务响应为空")]
     EmptyResponse,
-    #[error("网络请求失败：{0}")]
-    Request(#[from] reqwest::Error),
+    #[error("AI 调用失败：{0}")]
+    OpenAi(#[from] OpenAIError),
 }

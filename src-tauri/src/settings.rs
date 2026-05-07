@@ -27,10 +27,14 @@ impl Default for AppSettings {
 pub fn load_settings(app: &AppHandle) -> Result<AppSettings, SettingsError> {
     let path = settings_path(app)?;
     if !path.exists() {
+        log::debug!("settings file not found; using defaults");
         return Ok(AppSettings::default());
     }
+    log::debug!("loading settings; path={}", path.display());
     let content = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&content)?)
+    let settings = serde_json::from_str(&content)?;
+    log::debug!("settings loaded");
+    Ok(settings)
 }
 
 pub fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), SettingsError> {
@@ -38,8 +42,10 @@ pub fn save_settings(app: &AppHandle, settings: &AppSettings) -> Result<(), Sett
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    log::debug!("saving settings; path={}", path.display());
     let content = serde_json::to_string_pretty(settings)?;
     fs::write(path, content)?;
+    log::info!("settings saved");
     Ok(())
 }
 

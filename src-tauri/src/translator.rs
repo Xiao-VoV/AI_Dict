@@ -22,22 +22,33 @@ pub enum LookupResult {
 pub async fn lookup_text(app: &AppHandle, text: String) -> Result<LookupResult, TranslateError> {
     let source = text.trim().to_string();
     if source.is_empty() {
+        log::warn!("lookup rejected empty input");
         return Err(TranslateError::EmptyInput);
     }
 
+    log::debug!("lookup started; char_count={}", source.chars().count());
     if is_single_word(&source) {
+        log::debug!("lookup routed to dictionary; word={source}");
         if let Some(entry) = dictionary::lookup(&source) {
+            log::info!("dictionary hit; word={}", entry.word);
             return Ok(LookupResult::Dictionary { source, entry });
         }
 
+        log::info!("dictionary miss; word={source}");
         return Ok(LookupResult::DictionaryMiss {
             source,
             message: "本地词典暂未收录该词。".to_string(),
         });
     }
 
+    log::debug!("lookup routed to AI translation");
     let settings = settings::load_settings(app)?;
     let translated = ai::translate(&settings, &source).await?;
+    log::info!(
+        "AI translation completed; source_chars={} translated_chars={}",
+        source.chars().count(),
+        translated.chars().count()
+    );
     Ok(LookupResult::Translation { source, translated })
 }
 

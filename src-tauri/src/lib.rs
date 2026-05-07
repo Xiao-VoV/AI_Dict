@@ -6,18 +6,28 @@ mod translator;
 
 use tauri::{Emitter, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_log::{Target, TargetKind};
 
 #[tauri::command]
 async fn capture_selection_and_lookup(
     app: tauri::AppHandle,
 ) -> Result<translator::LookupResult, String> {
-    let text = selection::capture_selected_text()
-        .await
-        .map_err(|error| error.to_string())?;
-    let result = translator::lookup_text(&app, text)
-        .await
-        .map_err(|error| error.to_string())?;
+    log::debug!("capture_selection_and_lookup command started");
+    let text = selection::capture_selected_text().await.map_err(|error| {
+        log::warn!("failed to capture selected text: {error}");
+        error.to_string()
+    })?;
+    log::debug!(
+        "captured selected text; char_count={}",
+        text.chars().count()
+    );
+
+    let result = translator::lookup_text(&app, text).await.map_err(|error| {
+        log::warn!("lookup after selection capture failed: {error}");
+        error.to_string()
+    })?;
     let _ = app.emit("lookup-result", &result);
+    log::debug!("lookup-result event emitted");
     Ok(result)
 }
 
@@ -26,43 +36,87 @@ async fn lookup_text(
     app: tauri::AppHandle,
     text: String,
 ) -> Result<translator::LookupResult, String> {
-    translator::lookup_text(&app, text)
-        .await
-        .map_err(|error| error.to_string())
+    log::debug!(
+        "lookup_text command started; char_count={}",
+        text.chars().count()
+    );
+    translator::lookup_text(&app, text).await.map_err(|error| {
+        log::warn!("lookup_text command failed: {error}");
+        error.to_string()
+    })
 }
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, String> {
-    settings::load_settings(&app).map_err(|error| error.to_string())
+    log::debug!("get_settings command started");
+    settings::load_settings(&app).map_err(|error| {
+        log::warn!("get_settings command failed: {error}");
+        error.to_string()
+    })
 }
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: settings::AppSettings) -> Result<(), String> {
-    settings::save_settings(&app, &settings).map_err(|error| error.to_string())
+    log::debug!(
+        "save_settings command started; base_url_present={} model_present={} target_language={}",
+        !settings.base_url.trim().is_empty(),
+        !settings.model.trim().is_empty(),
+        settings.target_language
+    );
+    settings::save_settings(&app, &settings).map_err(|error| {
+        log::warn!("save_settings command failed: {error}");
+        error.to_string()
+    })
 }
 
 fn register_global_shortcut(app: &tauri::App) {
     if let Err(error) = app.global_shortcut().register("CommandOrControl+Shift+E") {
-        eprintln!("failed to register global shortcut: {error}");
+        log::error!("failed to register global shortcut: {error}");
+    } else {
+        log::info!("registered global shortcut CommandOrControl+Shift+E");
     }
+}
+
+fn log_plugin() -> tauri_plugin_log::Builder {
+    let level = if cfg!(debug_assertions) {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
+
+    tauri_plugin_log::Builder::new()
+        .level(level)
+        .targets([
+            Target::new(TargetKind::Stdout),
+            Target::new(TargetKind::LogDir {
+                file_name: Some("selection-translator".to_string()),
+            }),
+        ])
+        .max_file_size(256_000)
 }
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(log_plugin().build())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
+                        log::debug!("global shortcut pressed");
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
                             match capture_selection_and_lookup(app.clone()).await {
                                 Ok(_) => {
+                                    log::debug!("shortcut lookup completed");
                                     if let Some(window) = app.get_webview_window("main") {
                                         let _ = window.show();
                                         let _ = window.set_focus();
+                                    } else {
+                                        log::warn!("main window not found after shortcut lookup");
                                     }
                                 }
                                 Err(error) => {
+                                    log::warn!("shortcut lookup failed: {error}");
                                     let _ = app.emit("lookup-error", error);
                                 }
                             }
@@ -79,7 +133,9 @@ pub fn run() {
             save_settings
         ])
         .setup(|app| {
+            log::info!("selection translator app setup started");
             register_global_shortcut(app);
+            log::info!("selection translator app setup completed");
             Ok(())
         })
         .run(tauri::generate_context!())
