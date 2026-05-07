@@ -35,6 +35,20 @@
 - 单词查询链路调整：单词输入不再直接查本地词典，先调用 AI 返回译文与英文原型 `lemma`，再用 `lemma` 查询本地词典，最终前端同时展示单词翻译、原型和词典释义。
 - 新增 AI 单词分析结构化解析与测试，兼容纯 JSON 和 Markdown fenced JSON；本地示例词典补充 `run` 词条用于验证词形还原路径。
 - 重新验证：`npm run build`、`cargo test` 通过。
+- 词典系统扩展：将硬编码词典替换为 SQLite 词典服务，首次使用自动导入内置 `dicts/ECDICT/ecdict.mini.csv`，支持 ECDICT CSV 导入、词形映射、AI 单词卡片懒生成缓存、MDX 安全文本导入、词典列表和用户导入词典删除。
+- 前端升级为 `WordProfile` 多区块单词卡片，展示翻译、lemma、音标、释义、词形、考试标签、AI 记忆、短语、例句、同反义词、用户导入词典结果和来源。
+- 设置页新增词典管理卡片，并接入 Tauri dialog 文件选择；新增依赖 `rusqlite`、`csv`、`rs-mdict`、`tauri-plugin-dialog`、`@tauri-apps/plugin-dialog`。
+- 重新验证：`npm run build`、`cargo test`、`cargo check` 通过。
+- 需求调整：ECDICT 目录中的 CSV/脚本只作为词典源码或构建材料，应用运行时词典改为只支持 MDX；后续需要移除 CSV 导入与 `lex_words`/`word_forms` 结构化 CSV 表。
+- 中断前遗留验证：`npm run build` 通过；`cargo test` 中旧的 CSV 弹性解析测试失败，该路径将随 MDX-only 重构移除。
+- 完成 MDX-only 词典重构：重写 `dictionary.rs`，运行时只维护 `dictionaries`、`mdx_entries`、`ai_word_cards`，支持 `builtin_mdx` 和 `user_mdx`，并将 MDX HTML 降级为安全文本。
+- 移除 CSV 导入入口：删除后端 `import_ecdict_csv` command、前端 ECDICT CSV 按钮、`csv` Rust 依赖和旧 CSV 单元测试。
+- 新增内置词典资源目录 `src-tauri/resources/dicts/` 和 bundle resources 配置；当前仓库未放入 `ecdict.mdx` 时应用不 panic，会注册 0 条目的内置 ECDICT 状态。
+- 调整单词查询降级：AI lemma/翻译分析失败时继续用原词查本地 MDX，不再因为未配置 API Key 阻断本地词典。
+- 设置页词典管理改为“导入 MDX / 重建内置索引 / 删除用户 MDX”，内置 MDX 不允许删除。
+- 重新验证：`npm run build`、`cargo test`、`cargo check` 通过。
+- 修复旧数据库迁移错误：老版本 `dictionaries` 表没有 `builtin_key` 列，原实现先创建 `builtin_key` 唯一索引再补列导致重建内置索引失败；已改为先建/补列，再创建索引，并新增内存库迁移回归测试。
+- 重新验证：`cargo test`、`cargo check`、`npm run build` 通过。
 
 ## 待办
 - 运行 `npm run tauri:dev` 做真实桌面取词体验测试。

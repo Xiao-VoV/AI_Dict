@@ -83,6 +83,47 @@ async fn test_ai_connection(settings: settings::AppSettings) -> Result<(), Strin
     })
 }
 
+#[tauri::command]
+fn import_mdict(
+    app: tauri::AppHandle,
+    mdx_path: String,
+) -> Result<dictionary::ImportSummary, String> {
+    log::debug!("import_mdict command started; mdx_path={mdx_path}");
+    dictionary::import_mdict(&app, &mdx_path).map_err(|error| {
+        log::warn!("import_mdict command failed: {error}");
+        error.to_string()
+    })
+}
+
+#[tauri::command]
+fn reindex_builtin_dictionary(
+    app: tauri::AppHandle,
+) -> Result<dictionary::ImportSummary, String> {
+    log::debug!("reindex_builtin_dictionary command started");
+    dictionary::reindex_builtin_dictionary(&app).map_err(|error| {
+        log::warn!("reindex_builtin_dictionary command failed: {error}");
+        error.to_string()
+    })
+}
+
+#[tauri::command]
+fn list_dictionaries(app: tauri::AppHandle) -> Result<Vec<dictionary::DictionaryMetadata>, String> {
+    log::debug!("list_dictionaries command started");
+    dictionary::list_dictionaries(&app).map_err(|error| {
+        log::warn!("list_dictionaries command failed: {error}");
+        error.to_string()
+    })
+}
+
+#[tauri::command]
+fn delete_dictionary(app: tauri::AppHandle, dictionary_id: i64) -> Result<(), String> {
+    log::debug!("delete_dictionary command started; dictionary_id={dictionary_id}");
+    dictionary::delete_dictionary(&app, dictionary_id).map_err(|error| {
+        log::warn!("delete_dictionary command failed: {error}");
+        error.to_string()
+    })
+}
+
 fn register_global_shortcut(app: &tauri::App) {
     if let Err(error) = app.global_shortcut().register("CommandOrControl+Shift+E") {
         log::error!("failed to register global shortcut: {error}");
@@ -139,13 +180,18 @@ pub fn run() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             capture_selection_and_lookup,
             lookup_text,
             get_settings,
             save_settings,
-            test_ai_connection
+            test_ai_connection,
+            import_mdict,
+            reindex_builtin_dictionary,
+            list_dictionaries,
+            delete_dictionary
         ])
         .setup(|app| {
             log::info!("selection translator app setup started");

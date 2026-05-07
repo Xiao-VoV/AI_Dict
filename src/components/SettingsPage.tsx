@@ -1,9 +1,21 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Check, Globe2, Loader2, Save, Settings, Wifi } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import {
+  ArrowLeft,
+  Check,
+  Database,
+  FileInput,
+  Globe2,
+  Loader2,
+  Save,
+  Settings,
+  Trash2,
+  Wifi,
+} from "lucide-react";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useState } from "react";
 import { normalizeUiLanguage, type Messages } from "../i18n/messages";
-import type { AppSettings } from "../types";
+import type { AppSettings, DictionaryMetadata, ImportSummary } from "../types";
 import { Field } from "./Field";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
@@ -27,6 +39,9 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const [testStatus, setTestStatus] = useState<TestStatus>("idle");
   const [testMessage, setTestMessage] = useState(t.testIdle);
+  const [dictionaries, setDictionaries] = useState<DictionaryMetadata[]>([]);
+  const [dictionaryBusy, setDictionaryBusy] = useState(false);
+  const [dictionaryMessage, setDictionaryMessage] = useState("");
 
   useEffect(() => {
     if (testStatus === "idle") {
@@ -35,6 +50,10 @@ export function SettingsPage({
       setTestMessage(t.testSuccess);
     }
   }, [t, testStatus]);
+
+  useEffect(() => {
+    void refreshDictionaries();
+  }, []);
 
   async function testConnection() {
     setTestStatus("testing");
@@ -46,6 +65,56 @@ export function SettingsPage({
     } catch (message) {
       setTestStatus("error");
       setTestMessage(String(message));
+    }
+  }
+
+  async function refreshDictionaries() {
+    try {
+      const response = await invoke<DictionaryMetadata[]>("list_dictionaries");
+      setDictionaries(response);
+    } catch (message) {
+      setDictionaryMessage(String(message));
+    }
+  }
+
+  async function importMdx() {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "MDX Dictionary", extensions: ["mdx"] }],
+    });
+    if (typeof selected !== "string") return;
+    await runDictionaryImport("import_mdict", { mdxPath: selected });
+  }
+
+  async function reindexBuiltinDictionary() {
+    await runDictionaryImport("reindex_builtin_dictionary", {});
+  }
+
+  async function runDictionaryImport(command: string, payload: Record<string, unknown>) {
+    setDictionaryBusy(true);
+    setDictionaryMessage(t.dictionaryImporting);
+    try {
+      const summary = await invoke<ImportSummary>(command, payload);
+      setDictionaryMessage(
+        `${t.dictionaryImportSuccess}: ${summary.name} (${summary.importedEntries})`,
+      );
+      await refreshDictionaries();
+    } catch (message) {
+      setDictionaryMessage(String(message));
+    } finally {
+      setDictionaryBusy(false);
+    }
+  }
+
+  async function deleteDictionary(dictionaryId: number) {
+    setDictionaryBusy(true);
+    try {
+      await invoke("delete_dictionary", { dictionaryId });
+      await refreshDictionaries();
+    } catch (message) {
+      setDictionaryMessage(String(message));
+    } finally {
+      setDictionaryBusy(false);
     }
   }
 
@@ -72,6 +141,30 @@ export function SettingsPage({
 
       <section className="settings-viewport">
         <div className="settings-stack">
+
+
+          <section className="settings-panel rounded-lg border border-line bg-white/78 p-5 shadow-sm">
+            <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink">
+              <Globe2 className="h-4 w-4" />
+              {t.interfaceConfig}
+            </div>
+            <Field label={t.uiLanguage}>
+              <select
+                value={normalizeUiLanguage(settings.uiLanguage)}
+                onChange={(event) =>
+                  setSettings({
+                    ...settings,
+                    uiLanguage: normalizeUiLanguage(event.target.value),
+                  })
+                }
+                className="field"
+              >
+                <option value="zh-CN">{t.simplifiedChinese}</option>
+                <option value="en-US">{t.english}</option>
+              </select>
+            </Field>
+          </section>
+
           <section className="settings-panel rounded-lg border border-line bg-white/78 p-5 shadow-sm">
             <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink">
               <Settings className="h-4 w-4" />
@@ -152,28 +245,77 @@ export function SettingsPage({
               </div>
             </div>
           </section>
-          {/*  */}
+
           <section className="settings-panel rounded-lg border border-line bg-white/78 p-5 shadow-sm">
             <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink">
-              <Globe2 className="h-4 w-4" />
-              {t.interfaceConfig}
+              <Database className="h-4 w-4" />
+              {t.dictionaryConfig}
             </div>
-            <Field label={t.uiLanguage}>
-              <select
-                value={normalizeUiLanguage(settings.uiLanguage)}
-                onChange={(event) =>
-                  setSettings({
-                    ...settings,
-                    uiLanguage: normalizeUiLanguage(event.target.value),
-                  })
-                }
-                className="field"
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={importMdx}
+                disabled={dictionaryBusy}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-moss px-4 text-sm font-medium text-white transition hover:bg-ink disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <option value="zh-CN">{t.simplifiedChinese}</option>
-                <option value="en-US">{t.english}</option>
-              </select>
-            </Field>
+                {dictionaryBusy ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FileInput className="h-4 w-4" />
+                )}
+                {t.importMdx}
+              </button>
+              <button
+                onClick={reindexBuiltinDictionary}
+                disabled={dictionaryBusy}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-amber px-4 text-sm font-medium text-white transition hover:bg-moss disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Database className="h-4 w-4" />
+                {t.reindexBuiltinDictionary}
+              </button>
+            </div>
+            {dictionaryMessage ? (
+              <p className="mt-3 text-sm text-moss">{dictionaryMessage}</p>
+            ) : null}
+            <div className="mt-4 grid gap-2">
+              {dictionaries.length === 0 ? (
+                <p className="rounded-md bg-paper p-3 text-sm text-moss">
+                  {t.dictionariesEmpty}
+                </p>
+              ) : (
+                dictionaries.map((dictionary) => (
+                  <div
+                    key={`${dictionary.kind}-${dictionary.id}`}
+                    className="flex items-center justify-between gap-3 rounded-md bg-paper p-3"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium text-ink">
+                        {dictionary.name}
+                      </p>
+                      <p className="text-xs text-moss">
+                        {dictionary.kind === "builtin_mdx"
+                          ? t.builtinDictionary
+                          : t.userDictionary}{" "}
+                        · {dictionary.entryCount}
+                      </p>
+                    </div>
+                    {dictionary.kind === "user_mdx" ? (
+                      <button
+                        aria-label={t.deleteDictionary}
+                        className="icon-button"
+                        disabled={dictionaryBusy}
+                        onClick={() => deleteDictionary(dictionary.id)}
+                        title={t.deleteDictionary}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
           </section>
+
+
         </div>
       </section>
     </main>

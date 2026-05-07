@@ -5,16 +5,8 @@ use tauri::AppHandle;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum LookupResult {
-    Word {
-        source: String,
-        translated: String,
-        lemma: String,
-        entry: Option<dictionary::DictionaryEntry>,
-    },
-    Translation {
-        source: String,
-        translated: String,
-    },
+    Word { profile: dictionary::WordProfile },
+    Translation { source: String, translated: String },
 }
 
 pub async fn lookup_text(app: &AppHandle, text: String) -> Result<LookupResult, TranslateError> {
@@ -28,29 +20,38 @@ pub async fn lookup_text(app: &AppHandle, text: String) -> Result<LookupResult, 
     if is_single_word(&source) {
         log::debug!("lookup routed to AI word analysis; word={source}");
         let settings = settings::load_settings(app)?;
-        let analysis = ai::analyze_word(&settings, &source).await?;
-        let entry = dictionary::lookup(&analysis.lemma);
-
-        if let Some(entry) = &entry {
-            log::info!(
-                "AI word analysis completed with dictionary hit; source={} lemma={} dictionary_word={}",
-                source,
-                analysis.lemma,
-                entry.word
-            );
-        } else {
-            log::info!(
-                "AI word analysis completed with dictionary miss; source={} lemma={}",
-                source,
-                analysis.lemma
-            );
-        }
+        let analysis = match ai::analyze_word(&settings, &source).await {
+            Ok(analysis) => {
+                log::info!(
+                    "AI word analysis completed; source={} lemma={}",
+                    source,
+                    analysis.lemma
+                );
+                analysis
+            }
+            Err(error) => {
+                log::warn!(
+                    "AI word analysis failed; falling back to local MDX lookup; source={} error={error}",
+                    source
+                );
+                ai::WordAnalysis {
+                    translated: String::new(),
+                    lemma: source.to_ascii_lowercase(),
+                }
+            }
+        };
 
         return Ok(LookupResult::Word {
-            source,
-            translated: analysis.translated,
-            lemma: analysis.lemma,
-            entry,
+            profile: dictionary::lookup_word_profile(
+                app,
+                &settings,
+                dictionary::WordLookupSeed {
+                    source,
+                    translated: analysis.translated,
+                    lemma: analysis.lemma,
+                },
+            )
+            .await?,
         });
     }
 
@@ -83,4 +84,6 @@ pub enum TranslateError {
     Settings(#[from] settings::SettingsError),
     #[error(transparent)]
     Ai(#[from] ai::AiError),
+    #[error(transparent)]
+    Dictionary(#[from] dictionary::DictionaryError),
 }

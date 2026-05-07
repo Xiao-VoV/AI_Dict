@@ -16,6 +16,7 @@
 | 4. 开发路线图 | complete | 安排里程碑与验证顺序 | 分阶段开发计划 |
 | 5. 风险与验证清单 | complete | 列出高风险点和 PoC | 风险表与 PoC 建议 |
 | 6. MVP 工程实现 | complete | 搭建 Tauri + React + Tailwind + Rust MVP | 可编译的桌面应用骨架 |
+| 7. MDX-only 词典重构 | complete | 移除运行时 CSV 解析，改为内置/用户 MDX 索引 | MDX 词典服务、设置页 MDX 管理 |
 
 ## MVP 范围
 - 桌面端支持 macOS、Windows、主流 Linux 桌面环境。
@@ -43,7 +44,7 @@
 - UI：轻量组件库 + 自定义紧凑浮窗。
 - 存储：SQLite 或 sled；MVP 建议 SQLite。
 - 配置密钥：系统 Keychain/Credential Manager/Secret Service，短期可用 Tauri store + 加密兜底。
-- 词典格式：先用 StarDict/MDX 解析或导入为 SQLite/FTS；MVP 可先选一个开放词典源转换为内部 SQLite。
+- 词典格式：运行时只支持 MDX；ECDICT CSV/脚本仅作为上游源码或构建材料，发布包通过资源目录内置 ECDICT MDX。
 - AI 接入：OpenAI-compatible client 抽象，预留 provider adapter。
 
 ## 验证优先级
@@ -67,4 +68,4 @@
 - 已实现剪贴板取词兜底：保存剪贴板、模拟复制、读取文本、恢复剪贴板。
 - 已实现本地示例词典查询和 OpenAI-compatible 翻译调用。
 - 已通过 `npm run build` 和 `cargo check`。
-
+- 已将词典运行时重构为 MDX-only：内置 ECDICT MDX 资源索引、用户 MDX 导入、安全文本展示、AI 学习卡片缓存；CSV 导入已移除。

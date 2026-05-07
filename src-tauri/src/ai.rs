@@ -1,4 +1,4 @@
-use crate::settings::AppSettings;
+use crate::{dictionary, settings::AppSettings};
 use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
@@ -43,6 +43,38 @@ pub async fn analyze_word(settings: &AppSettings, word: &str) -> Result<WordAnal
         analysis.translated.chars().count()
     );
     Ok(analysis)
+}
+
+pub async fn enrich_word_card(
+    settings: &AppSettings,
+    source: &str,
+    lemma: &str,
+    local_dictionary_summary: Option<&str>,
+) -> Result<dictionary::AiWordCard, AiError> {
+    let local_context = local_dictionary_summary
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("本地 MDX 词典安全文本摘要：\n{value}"))
+        .unwrap_or_else(|| "本地 MDX 词典未命中。".to_string());
+
+    let response = complete_with_prompt(
+        settings,
+        "你是一个严谨的英语学习词典卡片生成助手。只输出 JSON，不要输出 Markdown。",
+        &format!(
+            "请基于事实数据为英文单词生成学习卡片。目标语言：{}。\
+             不要编造专有词典来源；不确定的同反义词可以留空数组。\
+             只输出严格 JSON，格式为：\
+             {{\"shortDefinition\":\"简明释义\",\"memoryHint\":\"记忆提示\",\
+             \"phrases\":[{{\"phrase\":\"短语\",\"meaning\":\"含义\"}}],\
+             \"examples\":[{{\"en\":\"英文例句\",\"zh\":\"中文翻译\",\"source\":\"AI\"}}],\
+             \"synonyms\":[\"同义词\"],\"antonyms\":[\"反义词\"]}}。\n\n\
+             原输入：{}\n词典原型：{}\n{}",
+            settings.target_language, source, lemma, local_context
+        ),
+        Duration::from_secs(30),
+    )
+    .await?;
+
+    parse_ai_word_card(&response)
 }
 
 pub async fn test_connection(settings: &AppSettings) -> Result<(), AiError> {
@@ -197,6 +229,17 @@ fn parse_word_analysis(content: &str) -> Result<WordAnalysis, AiError> {
     Ok(analysis)
 }
 
+fn parse_ai_word_card(content: &str) -> Result<dictionary::AiWordCard, AiError> {
+    let json = extract_json_object(content).ok_or_else(|| {
+        log::warn!("AI word card response did not contain JSON object");
+        AiError::InvalidStructuredResponse
+    })?;
+    serde_json::from_str(json).map_err(|error| {
+        log::warn!("AI word card JSON parse failed; error={error}");
+        AiError::InvalidStructuredResponse
+    })
+}
+
 fn extract_json_object(content: &str) -> Option<&str> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
@@ -218,7 +261,7 @@ fn normalize_base_url(base_url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_translation, normalize_base_url, parse_word_analysis,
+        extract_translation, normalize_base_url, parse_ai_word_card, parse_word_analysis,
         CompatibleChatCompletionResponse,
     };
 
@@ -260,6 +303,18 @@ mod tests {
 
         assert_eq!(analysis.translated, "翻译");
         assert_eq!(analysis.lemma, "translate");
+    }
+
+    #[test]
+    fn parses_ai_word_card_json() {
+        let card = parse_ai_word_card(
+            r#"{"shortDefinition":"实施；执行","memoryHint":"im + ple + ment","phrases":[{"phrase":"implement a plan","meaning":"实施计划"}],"examples":[{"en":"We implement the plan.","zh":"我们执行计划。","source":"AI"}],"synonyms":["execute"],"antonyms":[]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(card.short_definition.as_deref(), Some("实施；执行"));
+        assert_eq!(card.phrases[0].phrase, "implement a plan");
+        assert_eq!(card.examples[0].source, "AI");
     }
 }
 
