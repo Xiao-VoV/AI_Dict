@@ -12,6 +12,29 @@ use serde::Deserialize;
 use tokio::time::{timeout, Duration};
 
 pub async fn translate(settings: &AppSettings, text: &str) -> Result<String, AiError> {
+    translate_with_system_prompt(settings, text, "你是一个准确、简洁的翻译助手。").await
+}
+
+pub async fn test_connection(settings: &AppSettings) -> Result<(), AiError> {
+    let response = translate_with_system_prompt(
+        settings,
+        "connection test",
+        "你是一个 API 连通性检测助手。请只回复 ok。",
+    )
+    .await?;
+
+    log::info!(
+        "AI connection test succeeded; response_chars={}",
+        response.chars().count()
+    );
+    Ok(())
+}
+
+async fn translate_with_system_prompt(
+    settings: &AppSettings,
+    text: &str,
+    system_prompt: &str,
+) -> Result<String, AiError> {
     if settings.api_key.trim().is_empty() {
         log::warn!("AI translation rejected missing API key");
         return Err(AiError::MissingApiKey);
@@ -51,7 +74,7 @@ pub async fn translate(settings: &AppSettings, text: &str) -> Result<String, AiE
         .temperature(settings.temperature)
         .messages([
             ChatCompletionRequestSystemMessageArgs::default()
-                .content("你是一个准确、简洁的翻译助手。")
+                .content(system_prompt)
                 .build()?
                 .into(),
             ChatCompletionRequestUserMessageArgs::default()

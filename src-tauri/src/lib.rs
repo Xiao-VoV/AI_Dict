@@ -69,6 +69,20 @@ fn save_settings(app: tauri::AppHandle, settings: settings::AppSettings) -> Resu
     })
 }
 
+#[tauri::command]
+async fn test_ai_connection(settings: settings::AppSettings) -> Result<(), String> {
+    log::debug!(
+        "test_ai_connection command started; base_url_present={} model_present={} target_language={}",
+        !settings.base_url.trim().is_empty(),
+        !settings.model.trim().is_empty(),
+        settings.target_language
+    );
+    ai::test_connection(&settings).await.map_err(|error| {
+        log::warn!("test_ai_connection command failed: {error}");
+        error.to_string()
+    })
+}
+
 fn register_global_shortcut(app: &tauri::App) {
     if let Err(error) = app.global_shortcut().register("CommandOrControl+Shift+E") {
         log::error!("failed to register global shortcut: {error}");
@@ -130,7 +144,8 @@ pub fn run() {
             capture_selection_and_lookup,
             lookup_text,
             get_settings,
-            save_settings
+            save_settings,
+            test_ai_connection
         ])
         .setup(|app| {
             log::info!("selection translator app setup started");

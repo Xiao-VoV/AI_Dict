@@ -10,6 +10,8 @@ pub struct AppSettings {
     pub model: String,
     pub temperature: f32,
     pub target_language: String,
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
 }
 
 impl Default for AppSettings {
@@ -20,8 +22,13 @@ impl Default for AppSettings {
             model: "gpt-4o-mini".to_string(),
             temperature: 0.2,
             target_language: "简体中文".to_string(),
+            ui_language: default_ui_language(),
         }
     }
+}
+
+fn default_ui_language() -> String {
+    "zh-CN".to_string()
 }
 
 pub fn load_settings(app: &AppHandle) -> Result<AppSettings, SettingsError> {

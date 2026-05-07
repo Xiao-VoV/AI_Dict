@@ -23,6 +23,15 @@
 - 重新验证：`cargo check`、`cargo test`、`npm run build` 通过。
 - 修复前端结果展示：后端 `LookupResult` 使用 `serde(rename_all = "camelCase")`，实际 `kind` 为 `dictionary`、`translation`、`dictionaryMiss`；前端此前判断大写枚举名导致翻译结果不渲染。已统一为 camelCase。
 - 重新验证：`npm run build`、`cargo test` 通过。
+- 设置页增强：新增响应式/容器自适应布局，小窗口下自动单列并在面板内部滚动，避免窗口级滚动。
+- 模型设置新增 API 联通检测：后端新增 `test_ai_connection` 命令，复用当前表单配置发起极短 AI 请求，前端显示检测中/成功/失败状态。
+- UI 新增轻量国际化：内置 `zh-CN` 与 `en-US` 文案字典，设置中可切换界面语言，并将 `uiLanguage` 保存到设置文件；旧设置通过 serde default 兼容。
+- 重新验证：`npm run build`、`cargo test` 通过。
+- 前端模块化重构：将 `App.tsx` 收缩为应用状态/命令编排，新增 `types.ts`、`settingsDefaults.ts`、`i18n/messages.ts`，并拆出 `HomePage`、`SettingsPage`、`ResultPanel`、`Field` 组件。
+- 设置页调整：界面语言从模型配置卡片中移出，改为独立的界面设置卡片；设置页继续保持窗口级不滚动，卡片栈在内部滚动。
+- 重新验证：`npm run build` 通过。
+- 设置页横向布局调整：移除设置内容 `44rem` 最大宽度限制，设置卡片左右随窗口宽度铺开，仅保留页面外边距。
+- 重新验证：`npm run build` 通过。
 
 ## 待办
 - 运行 `npm run tauri:dev` 做真实桌面取词体验测试。
