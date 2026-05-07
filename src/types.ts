@@ -17,6 +17,11 @@ export type DictionaryEntry = {
 };
 
 export type LookupResult =
-  | { kind: "dictionary"; source: string; entry: DictionaryEntry }
-  | { kind: "translation"; source: string; translated: string }
-  | { kind: "dictionaryMiss"; source: string; message: string };
+  | {
+      kind: "word";
+      source: string;
+      translated: string;
+      lemma: string;
+      entry: DictionaryEntry | null;
+    }
+  | { kind: "translation"; source: string; translated: string };

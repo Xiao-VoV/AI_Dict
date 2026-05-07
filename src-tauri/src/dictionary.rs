@@ -37,6 +37,15 @@ pub fn lookup(word: &str) -> Option<DictionaryEntry> {
             vec![("v.", "翻译；转化；解释；转换")],
             vec!["Please translate this sentence into Chinese."],
         )),
+        "run" => Some(entry(
+            "run",
+            "/rʌn/",
+            vec![
+                ("v.", "跑；运行；经营；持续"),
+                ("n.", "跑步；行程；连续一段时间"),
+            ],
+            vec!["The service can run in the background."],
+        )),
         "selection" => Some(entry(
             "selection",
             "/sɪ'lekʃn/",

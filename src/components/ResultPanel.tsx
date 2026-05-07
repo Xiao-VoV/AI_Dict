@@ -1,6 +1,6 @@
 import { BookOpen } from "lucide-react";
 import type { Messages } from "../i18n/messages";
-import type { LookupResult } from "../types";
+import type { DictionaryEntry, LookupResult } from "../types";
 
 type ResultPanelProps = {
   result: LookupResult | null;
@@ -26,13 +26,7 @@ export function ResultPanel({ result, error, t }: ResultPanelProps) {
             {t.emptyResult}
           </div>
         ) : null}
-        {!error && result?.kind === "dictionary" ? <DictionaryResult result={result} /> : null}
-        {!error && result?.kind === "dictionaryMiss" ? (
-          <div className="space-y-3">
-            <p className="text-lg font-semibold text-ink">{result.source}</p>
-            <p className="rounded-md bg-paper p-3 text-sm text-moss">{result.message}</p>
-          </div>
-        ) : null}
+        {!error && result?.kind === "word" ? <WordResult result={result} t={t} /> : null}
         {!error && result?.kind === "translation" ? (
           <TranslationResult result={result} t={t} />
         ) : null}
@@ -41,17 +35,52 @@ export function ResultPanel({ result, error, t }: ResultPanelProps) {
   );
 }
 
-function DictionaryResult({ result }: { result: Extract<LookupResult, { kind: "dictionary" }> }) {
+function WordResult({
+  result,
+  t,
+}: {
+  result: Extract<LookupResult, { kind: "word" }>;
+  t: Messages;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <div className="rounded-md bg-paper p-3">
+          <p className="mb-1 text-xs font-semibold text-moss">{t.source}</p>
+          <p className="text-xl font-semibold text-ink">{result.source}</p>
+        </div>
+        <div className="rounded-md bg-white p-3 ring-1 ring-line">
+          <p className="mb-1 text-xs font-semibold text-amber">{t.translation}</p>
+          <p className="text-xl font-semibold text-ink">{result.translated}</p>
+        </div>
+      </div>
+      <div className="rounded-md bg-paper p-3">
+        <p className="mb-1 text-xs font-semibold text-moss">{t.wordBaseForm}</p>
+        <p className="text-base font-medium text-ink">{result.lemma}</p>
+      </div>
+      {result.entry ? (
+        <div className="border-t border-line pt-4">
+          <p className="mb-3 text-sm font-semibold text-ink">{t.dictionaryDetail}</p>
+          <DictionaryEntryView entry={result.entry} />
+        </div>
+      ) : (
+        <p className="rounded-md bg-paper p-3 text-sm text-moss">{t.dictionaryMiss}</p>
+      )}
+    </div>
+  );
+}
+
+function DictionaryEntryView({ entry }: { entry: DictionaryEntry }) {
   return (
     <div className="space-y-4">
       <div>
         <div className="flex flex-wrap items-baseline gap-2">
-          <h2 className="text-2xl font-semibold text-ink">{result.entry.word}</h2>
-          <span className="text-sm text-moss">{result.entry.phonetic}</span>
+          <h2 className="text-2xl font-semibold text-ink">{entry.word}</h2>
+          <span className="text-sm text-moss">{entry.phonetic}</span>
         </div>
       </div>
       <div className="space-y-2">
-        {result.entry.definitions.map((definition, index) => (
+        {entry.definitions.map((definition, index) => (
           <div key={`${definition.partOfSpeech}-${index}`} className="rounded-md bg-paper p-3">
             <span className="mr-2 text-xs font-semibold text-amber">
               {definition.partOfSpeech}
@@ -60,9 +89,9 @@ function DictionaryResult({ result }: { result: Extract<LookupResult, { kind: "d
           </div>
         ))}
       </div>
-      {result.entry.examples.length > 0 ? (
+      {entry.examples.length > 0 ? (
         <div className="border-t border-line pt-3">
-          {result.entry.examples.map((example) => (
+          {entry.examples.map((example) => (
             <p key={example} className="text-sm text-moss">
               {example}
             </p>

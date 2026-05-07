@@ -5,17 +5,15 @@ use tauri::AppHandle;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub enum LookupResult {
-    Dictionary {
+    Word {
         source: String,
-        entry: dictionary::DictionaryEntry,
+        translated: String,
+        lemma: String,
+        entry: Option<dictionary::DictionaryEntry>,
     },
     Translation {
         source: String,
         translated: String,
-    },
-    DictionaryMiss {
-        source: String,
-        message: String,
     },
 }
 
@@ -28,16 +26,31 @@ pub async fn lookup_text(app: &AppHandle, text: String) -> Result<LookupResult, 
 
     log::debug!("lookup started; char_count={}", source.chars().count());
     if is_single_word(&source) {
-        log::debug!("lookup routed to dictionary; word={source}");
-        if let Some(entry) = dictionary::lookup(&source) {
-            log::info!("dictionary hit; word={}", entry.word);
-            return Ok(LookupResult::Dictionary { source, entry });
+        log::debug!("lookup routed to AI word analysis; word={source}");
+        let settings = settings::load_settings(app)?;
+        let analysis = ai::analyze_word(&settings, &source).await?;
+        let entry = dictionary::lookup(&analysis.lemma);
+
+        if let Some(entry) = &entry {
+            log::info!(
+                "AI word analysis completed with dictionary hit; source={} lemma={} dictionary_word={}",
+                source,
+                analysis.lemma,
+                entry.word
+            );
+        } else {
+            log::info!(
+                "AI word analysis completed with dictionary miss; source={} lemma={}",
+                source,
+                analysis.lemma
+            );
         }
 
-        log::info!("dictionary miss; word={source}");
-        return Ok(LookupResult::DictionaryMiss {
+        return Ok(LookupResult::Word {
             source,
-            message: "本地词典暂未收录该词。".to_string(),
+            translated: analysis.translated,
+            lemma: analysis.lemma,
+            entry,
         });
     }
 

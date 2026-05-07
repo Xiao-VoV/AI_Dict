@@ -15,6 +15,36 @@ pub async fn translate(settings: &AppSettings, text: &str) -> Result<String, AiE
     translate_with_system_prompt(settings, text, "你是一个准确、简洁的翻译助手。").await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WordAnalysis {
+    pub translated: String,
+    pub lemma: String,
+}
+
+pub async fn analyze_word(settings: &AppSettings, word: &str) -> Result<WordAnalysis, AiError> {
+    let response = complete_with_prompt(
+        settings,
+        "你是一个准确的英语词形还原和翻译助手。只输出 JSON，不要输出 Markdown。",
+        &format!(
+            "分析下面这个英文单词，把它翻译成{}，并给出用于查词典的英文原型/词元。\
+             只输出严格 JSON，格式为 {{\"translated\":\"译文\",\"lemma\":\"英文原型\"}}。\
+             如果它已经是原型，lemma 就返回它本身。\n\n单词：{}",
+            settings.target_language, word
+        ),
+        Duration::from_secs(30),
+    )
+    .await?;
+    let analysis = parse_word_analysis(&response)?;
+    log::debug!(
+        "AI word analysis parsed; word_chars={} lemma={} translated_chars={}",
+        word.chars().count(),
+        analysis.lemma,
+        analysis.translated.chars().count()
+    );
+    Ok(analysis)
+}
+
 pub async fn test_connection(settings: &AppSettings) -> Result<(), AiError> {
     let response = translate_with_system_prompt(
         settings,
@@ -34,6 +64,20 @@ async fn translate_with_system_prompt(
     settings: &AppSettings,
     text: &str,
     system_prompt: &str,
+) -> Result<String, AiError> {
+    let prompt = format!(
+        "请把下面文本翻译成{}。只输出译文，必要时保留专有名词：\n\n{}",
+        settings.target_language, text
+    );
+
+    complete_with_prompt(settings, system_prompt, &prompt, Duration::from_secs(30)).await
+}
+
+async fn complete_with_prompt(
+    settings: &AppSettings,
+    system_prompt: &str,
+    user_prompt: &str,
+    request_timeout: Duration,
 ) -> Result<String, AiError> {
     if settings.api_key.trim().is_empty() {
         log::warn!("AI translation rejected missing API key");
@@ -55,7 +99,7 @@ async fn translate_with_system_prompt(
         base_url,
         settings.model.trim(),
         settings.target_language,
-        text.chars().count(),
+        user_prompt.chars().count(),
         settings.temperature
     );
 
@@ -63,11 +107,6 @@ async fn translate_with_system_prompt(
         .with_api_key(settings.api_key.trim())
         .with_api_base(base_url.clone());
     let client = Client::with_config(config);
-
-    let prompt = format!(
-        "请把下面文本翻译成{}。只输出译文，必要时保留专有名词：\n\n{}",
-        settings.target_language, text
-    );
 
     let request = CreateChatCompletionRequestArgs::default()
         .model(settings.model.trim())
@@ -78,14 +117,14 @@ async fn translate_with_system_prompt(
                 .build()?
                 .into(),
             ChatCompletionRequestUserMessageArgs::default()
-                .content(prompt)
+                .content(user_prompt)
                 .build()?
                 .into(),
         ])
         .build()?;
 
     let response: CompatibleChatCompletionResponse =
-        timeout(Duration::from_secs(30), client.chat().create_byot(request))
+        timeout(request_timeout, client.chat().create_byot(request))
             .await
             .map_err(|_| {
                 log::warn!(
@@ -138,6 +177,35 @@ fn extract_translation(response: CompatibleChatCompletionResponse) -> Result<Str
         .ok_or(AiError::EmptyResponse)
 }
 
+fn parse_word_analysis(content: &str) -> Result<WordAnalysis, AiError> {
+    let json = extract_json_object(content).ok_or_else(|| {
+        log::warn!("AI word analysis response did not contain JSON object");
+        AiError::InvalidStructuredResponse
+    })?;
+    let mut analysis: WordAnalysis = serde_json::from_str(json).map_err(|error| {
+        log::warn!("AI word analysis JSON parse failed; error={error}");
+        AiError::InvalidStructuredResponse
+    })?;
+    analysis.translated = analysis.translated.trim().to_string();
+    analysis.lemma = analysis.lemma.trim().to_ascii_lowercase();
+
+    if analysis.translated.is_empty() || analysis.lemma.is_empty() {
+        log::warn!("AI word analysis response missing translated or lemma");
+        return Err(AiError::InvalidStructuredResponse);
+    }
+
+    Ok(analysis)
+}
+
+fn extract_json_object(content: &str) -> Option<&str> {
+    let start = content.find('{')?;
+    let end = content.rfind('}')?;
+    if start > end {
+        return None;
+    }
+    Some(&content[start..=end])
+}
+
 fn normalize_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim().trim_end_matches('/');
     trimmed
@@ -149,7 +217,10 @@ fn normalize_base_url(base_url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_translation, normalize_base_url, CompatibleChatCompletionResponse};
+    use super::{
+        extract_translation, normalize_base_url, parse_word_analysis,
+        CompatibleChatCompletionResponse,
+    };
 
     #[test]
     fn strips_chat_completions_endpoint_from_base_url() {
@@ -171,6 +242,25 @@ mod tests {
 
         assert_eq!(extract_translation(response).unwrap(), "你好，测试");
     }
+
+    #[test]
+    fn parses_word_analysis_from_plain_json() {
+        let analysis =
+            parse_word_analysis(r#"{"translated":"运行","lemma":"run"}"#).expect("valid json");
+
+        assert_eq!(analysis.translated, "运行");
+        assert_eq!(analysis.lemma, "run");
+    }
+
+    #[test]
+    fn parses_word_analysis_from_markdown_wrapped_json() {
+        let analysis =
+            parse_word_analysis("```json\n{\"translated\":\"翻译\",\"lemma\":\"translate\"}\n```")
+                .expect("wrapped json");
+
+        assert_eq!(analysis.translated, "翻译");
+        assert_eq!(analysis.lemma, "translate");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -185,6 +275,8 @@ pub enum AiError {
     Timeout,
     #[error("AI 服务响应为空")]
     EmptyResponse,
+    #[error("AI 单词分析响应格式不正确")]
+    InvalidStructuredResponse,
     #[error("AI 调用失败：{0}")]
     OpenAi(#[from] OpenAIError),
 }
