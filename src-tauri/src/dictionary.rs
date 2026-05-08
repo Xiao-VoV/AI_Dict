@@ -6,14 +6,15 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager};
 
 const BUILTIN_ECDICT_KEY: &str = "ecdict";
 const BUILTIN_ECDICT_NAME: &str = "ECDICT";
-const BUILTIN_ECDICT_RESOURCE: &str = "resources/dicts/ecdict.mdx";
-const AI_CARD_PROMPT_VERSION: &str = "word-card-v2-mdx";
+const BUILTIN_ECDICT_RESOURCE: &str = "resources/dicts/ecdict.db";
+const AI_CARD_PROMPT_VERSION: &str = "word-card-v3-ecdict-sqlite";
 const MAX_CARD_TEXT_CHARS: usize = 1_200;
 const MAX_IMPORTED_CARDS: usize = 5;
 const INDEX_PROGRESS_BATCH_SIZE: usize = 2_000;
@@ -146,6 +147,29 @@ pub struct WordLookupSeed {
     pub lemma: String,
 }
 
+struct EcdictEntry {
+    word: String,
+    phonetic: Option<String>,
+    definition: Option<String>,
+    translation: Option<String>,
+    pos: Option<String>,
+    tag: Option<String>,
+    exchange: Option<String>,
+}
+
+impl EcdictEntry {
+    fn to_plain_text(&self) -> String {
+        let mut lines = Vec::new();
+        push_optional_lines(&mut lines, self.translation.as_deref());
+        push_optional_lines(&mut lines, self.definition.as_deref());
+        push_labeled_line(&mut lines, "phonetic", self.phonetic.as_deref());
+        push_labeled_line(&mut lines, "exchange", self.exchange.as_deref());
+        push_labeled_line(&mut lines, "tag", self.tag.as_deref());
+        push_labeled_line(&mut lines, "pos", self.pos.as_deref());
+        lines.join("\n")
+    }
+}
+
 pub async fn lookup_word_profile(
     app: &AppHandle,
     settings: &settings::AppSettings,
@@ -208,6 +232,8 @@ pub async fn lookup_word_profile(
 }
 
 pub fn import_mdict(app: &AppHandle, mdx_path: &str) -> Result<ImportSummary, DictionaryError> {
+    let name = mdx_name_from_path(Path::new(mdx_path));
+    let _index_task = begin_index_task(app, &name, DictionaryKind::UserMdx.as_str())?;
     let mut db = DictionaryStore::open(app)?;
     db.ensure_schema()?;
     db.import_mdx_dictionary(app, mdx_path, DictionaryKind::UserMdx)
@@ -217,6 +243,10 @@ pub fn reindex_builtin_dictionary(app: &AppHandle) -> Result<ImportSummary, Dict
     let mut db = DictionaryStore::open(app)?;
     db.ensure_schema()?;
     db.reindex_builtin_dictionary(app)
+}
+
+pub fn current_index_progress() -> Option<DictionaryIndexProgress> {
+    lock_index_progress().clone()
 }
 
 pub fn list_dictionaries(app: &AppHandle) -> Result<Vec<DictionaryMetadata>, DictionaryError> {
@@ -231,14 +261,14 @@ pub fn delete_dictionary(app: &AppHandle, dictionary_id: i64) -> Result<(), Dict
 }
 
 enum DictionaryKind {
-    BuiltinMdx,
+    BuiltinSqlite,
     UserMdx,
 }
 
 impl DictionaryKind {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::BuiltinMdx => "builtin_mdx",
+            Self::BuiltinSqlite => "builtin_sqlite",
             Self::UserMdx => "user_mdx",
         }
     }
@@ -328,28 +358,60 @@ impl DictionaryStore {
 
     fn ensure_builtin_dictionary(&self, app: &AppHandle) -> Result<(), DictionaryError> {
         self.ensure_schema()?;
+        let path = builtin_ecdict_db_path(app)?;
+        let path_string = path.as_ref().map(|path| path.to_string_lossy().to_string());
         let existing = self
             .conn
             .query_row(
-                "select id from dictionaries where builtin_key = ?1",
+                "select id, path, entry_count from dictionaries where builtin_key = ?1",
                 [BUILTIN_ECDICT_KEY],
-                |row| row.get::<_, i64>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .optional()?;
 
-        if existing.is_none() {
-            let path = builtin_mdx_path(app)?.map(|path| path.to_string_lossy().to_string());
-            if path.is_none() {
+        let entry_count = match (&path, &path_string, &existing) {
+            (Some(path), Some(path_string), Some((_, existing_path, existing_count)))
+                if existing_path.as_deref() == Some(path_string.as_str())
+                    && *existing_count > 0 =>
+            {
+                *existing_count
+            }
+            (Some(path), _, _) => ecdict_entry_count(path)?,
+            (None, _, _) => {
                 log::warn!(
-                    "built-in ECDICT MDX resource not found; expected {}",
+                    "built-in ECDICT SQLite resource not found; expected {}",
                     BUILTIN_ECDICT_RESOURCE
                 );
+                0
             }
+        };
+
+        if let Some((dictionary_id, _, _)) = existing {
+            self.conn.execute(
+                "update dictionaries
+                 set name = ?1, kind = ?2, path = ?3, entry_count = ?4
+                 where id = ?5",
+                params![
+                    BUILTIN_ECDICT_NAME,
+                    DictionaryKind::BuiltinSqlite.as_str(),
+                    path_string.as_deref(),
+                    entry_count,
+                    dictionary_id
+                ],
+            )?;
+        } else {
             self.create_dictionary(
                 BUILTIN_ECDICT_NAME,
-                DictionaryKind::BuiltinMdx.as_str(),
-                path.as_deref(),
+                DictionaryKind::BuiltinSqlite.as_str(),
+                path_string.as_deref(),
                 Some(BUILTIN_ECDICT_KEY),
+                entry_count,
             )?;
         }
         Ok(())
@@ -360,43 +422,20 @@ impl DictionaryStore {
         app: &AppHandle,
     ) -> Result<ImportSummary, DictionaryError> {
         self.ensure_schema()?;
-        let Some(path) = builtin_mdx_path(app)? else {
+        let Some(path) = builtin_ecdict_db_path(app)? else {
             self.ensure_builtin_dictionary(app)?;
-            return Err(DictionaryError::MissingBuiltinMdx);
+            return Err(DictionaryError::MissingBuiltinDb);
         };
-
-        if let Some(dictionary_id) = self
-            .conn
-            .query_row(
-                "select id from dictionaries where builtin_key = ?1",
-                [BUILTIN_ECDICT_KEY],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            self.conn.execute(
-                "delete from mdx_entries where dictionary_id = ?1",
-                [dictionary_id],
-            )?;
-            self.conn
-                .execute("delete from dictionaries where id = ?1", [dictionary_id])?;
-        }
-
-        self.import_builtin_dictionary(app, &path)
-    }
-
-    fn import_builtin_dictionary(
-        &mut self,
-        app: &AppHandle,
-        path: &Path,
-    ) -> Result<ImportSummary, DictionaryError> {
-        self.import_mdx_dictionary_at_path(
-            app,
-            path,
-            BUILTIN_ECDICT_NAME,
-            DictionaryKind::BuiltinMdx,
-            Some(BUILTIN_ECDICT_KEY),
-        )
+        let entry_count = ecdict_entry_count(&path)?;
+        let path_string = path.to_string_lossy().to_string();
+        let dictionary_id = self.upsert_builtin_dictionary(&path_string, entry_count)?;
+        Ok(ImportSummary {
+            dictionary_id: Some(dictionary_id),
+            name: BUILTIN_ECDICT_NAME.to_string(),
+            kind: DictionaryKind::BuiltinSqlite.as_str().to_string(),
+            imported_entries: entry_count as usize,
+            skipped_entries: 0,
+        })
     }
 
     fn import_mdx_dictionary(
@@ -406,11 +445,8 @@ impl DictionaryStore {
         kind: DictionaryKind,
     ) -> Result<ImportSummary, DictionaryError> {
         let path = Path::new(mdx_path);
-        let name = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("MDX Dictionary");
-        self.import_mdx_dictionary_at_path(app, path, name, kind, None)
+        let name = mdx_name_from_path(path);
+        self.import_mdx_dictionary_at_path(app, path, &name, kind, None)
     }
 
     fn import_mdx_dictionary_at_path(
@@ -434,7 +470,7 @@ impl DictionaryStore {
         };
 
         let dictionary_id =
-            self.create_dictionary(name, kind.as_str(), Some(&path_string), builtin_key)?;
+            self.create_dictionary(name, kind.as_str(), Some(&path_string), builtin_key, 0)?;
 
         let mut imported_entries = 0usize;
         let mut skipped_entries = 0usize;
@@ -519,13 +555,52 @@ impl DictionaryStore {
         kind: &str,
         path: Option<&str>,
         builtin_key: Option<&str>,
+        entry_count: i64,
     ) -> Result<i64, DictionaryError> {
         self.conn.execute(
             "insert into dictionaries (name, kind, path, entry_count, created_at, builtin_key)
-             values (?1, ?2, ?3, 0, ?4, ?5)",
-            params![name, kind, path, now_ts(), builtin_key],
+             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![name, kind, path, entry_count, now_ts(), builtin_key],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    fn upsert_builtin_dictionary(
+        &self,
+        path: &str,
+        entry_count: i64,
+    ) -> Result<i64, DictionaryError> {
+        if let Some(dictionary_id) = self
+            .conn
+            .query_row(
+                "select id from dictionaries where builtin_key = ?1",
+                [BUILTIN_ECDICT_KEY],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            self.conn.execute(
+                "update dictionaries
+                 set name = ?1, kind = ?2, path = ?3, entry_count = ?4
+                 where id = ?5",
+                params![
+                    BUILTIN_ECDICT_NAME,
+                    DictionaryKind::BuiltinSqlite.as_str(),
+                    path,
+                    entry_count,
+                    dictionary_id
+                ],
+            )?;
+            Ok(dictionary_id)
+        } else {
+            self.create_dictionary(
+                BUILTIN_ECDICT_NAME,
+                DictionaryKind::BuiltinSqlite.as_str(),
+                Some(path),
+                Some(BUILTIN_ECDICT_KEY),
+                entry_count,
+            )
+        }
     }
 
     fn lookup_cards(&self, word: &str) -> Result<Vec<ImportedCard>, DictionaryError> {
@@ -534,17 +609,24 @@ impl DictionaryStore {
             return Ok(Vec::new());
         }
 
+        let mut cards = self.lookup_builtin_ecdict_card(&normalized)?;
+        let remaining_limit = MAX_IMPORTED_CARDS.saturating_sub(cards.len());
+        if remaining_limit == 0 {
+            return Ok(cards);
+        }
+
         let mut stmt = self.conn.prepare(
             r#"
             select e.dictionary_id, d.name, e.headword, e.plain_text
             from mdx_entries e
             join dictionaries d on d.id = e.dictionary_id
             where e.normalized_word = ?1
-            order by case d.kind when 'builtin_mdx' then 0 else 1 end, d.created_at asc
+              and d.kind = 'user_mdx'
+            order by d.created_at asc
             limit ?2
             "#,
         )?;
-        let rows = stmt.query_map(params![normalized, MAX_IMPORTED_CARDS as i64], |row| {
+        let rows = stmt.query_map(params![normalized, remaining_limit as i64], |row| {
             Ok(ImportedCard {
                 dictionary_id: row.get(0)?,
                 dictionary_name: row.get(1)?,
@@ -553,8 +635,64 @@ impl DictionaryStore {
             })
         })?;
 
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(DictionaryError::from)
+        cards.extend(rows.collect::<Result<Vec<_>, _>>()?);
+        Ok(cards)
+    }
+
+    fn lookup_builtin_ecdict_card(&self, word: &str) -> Result<Vec<ImportedCard>, DictionaryError> {
+        let Some((dictionary_id, path)) = self
+            .conn
+            .query_row(
+                "select id, path from dictionaries where builtin_key = ?1 and kind = ?2",
+                params![BUILTIN_ECDICT_KEY, DictionaryKind::BuiltinSqlite.as_str()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(path) = path else {
+            return Ok(Vec::new());
+        };
+
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        let entry = conn
+            .query_row(
+                r#"
+                select word, phonetic, definition, translation, pos, tag, exchange
+                from stardict
+                where word = ?1 collate nocase or sw = ?1 collate nocase
+                order by case when word = ?1 collate nocase then 0 else 1 end
+                limit 1
+                "#,
+                [word],
+                |row| {
+                    Ok(EcdictEntry {
+                        word: row.get(0)?,
+                        phonetic: row.get(1)?,
+                        definition: row.get(2)?,
+                        translation: row.get(3)?,
+                        pos: row.get(4)?,
+                        tag: row.get(5)?,
+                        exchange: row.get(6)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(entry
+            .map(|entry| {
+                vec![ImportedCard {
+                    dictionary_id,
+                    dictionary_name: BUILTIN_ECDICT_NAME.to_string(),
+                    headword: entry.word.clone(),
+                    plain_text: entry.to_plain_text(),
+                }]
+            })
+            .unwrap_or_default())
     }
 
     fn get_ai_card(
@@ -611,8 +749,8 @@ impl DictionaryStore {
         let mut stmt = self.conn.prepare(
             "select id, name, kind, path, entry_count, created_at
              from dictionaries
-             where kind in ('builtin_mdx', 'user_mdx')
-             order by case kind when 'builtin_mdx' then 0 else 1 end, created_at asc",
+             where kind in ('builtin_sqlite', 'builtin_mdx', 'user_mdx')
+             order by case when builtin_key is not null then 0 else 1 end, created_at asc",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(DictionaryMetadata {
@@ -637,7 +775,9 @@ impl DictionaryStore {
                 |row| row.get(0),
             )
             .optional()?;
-        if kind.as_deref() == Some(DictionaryKind::BuiltinMdx.as_str()) {
+        if kind.as_deref() == Some(DictionaryKind::BuiltinSqlite.as_str())
+            || kind.as_deref() == Some("builtin_mdx")
+        {
             return Err(DictionaryError::CannotDeleteBuiltin);
         }
 
@@ -684,7 +824,62 @@ fn emit_index_progress(
     skipped_entries: usize,
     done: bool,
 ) {
-    let payload = DictionaryIndexProgress {
+    let payload = build_index_progress(
+        name,
+        kind,
+        phase,
+        processed_entries,
+        total_entries,
+        imported_entries,
+        skipped_entries,
+        done,
+    );
+    set_index_progress(&payload);
+    if let Err(error) = app.emit("dictionary-index-progress", payload) {
+        log::warn!("failed to emit dictionary index progress: {error}");
+    }
+}
+
+struct IndexTaskGuard;
+
+impl Drop for IndexTaskGuard {
+    fn drop(&mut self) {
+        clear_index_progress();
+    }
+}
+
+fn begin_index_task(
+    app: &AppHandle,
+    name: &str,
+    kind: &str,
+) -> Result<IndexTaskGuard, DictionaryError> {
+    let payload = build_index_progress(name, kind, "opening", 0, 0, 0, 0, false);
+    {
+        let mut progress = lock_index_progress();
+        if let Some(active) = progress.as_ref() {
+            return Err(DictionaryError::IndexTaskAlreadyRunning(
+                active.name.clone(),
+            ));
+        }
+        *progress = Some(payload.clone());
+    }
+    if let Err(error) = app.emit("dictionary-index-progress", payload) {
+        log::warn!("failed to emit dictionary index progress: {error}");
+    }
+    Ok(IndexTaskGuard)
+}
+
+fn build_index_progress(
+    name: &str,
+    kind: &str,
+    phase: &str,
+    processed_entries: usize,
+    total_entries: usize,
+    imported_entries: usize,
+    skipped_entries: usize,
+    done: bool,
+) -> DictionaryIndexProgress {
+    DictionaryIndexProgress {
         name: name.to_string(),
         kind: kind.to_string(),
         phase: phase.to_string(),
@@ -693,10 +888,35 @@ fn emit_index_progress(
         imported_entries,
         skipped_entries,
         done,
-    };
-    if let Err(error) = app.emit("dictionary-index-progress", payload) {
-        log::warn!("failed to emit dictionary index progress: {error}");
     }
+}
+
+fn set_index_progress(payload: &DictionaryIndexProgress) {
+    let mut progress = lock_index_progress();
+    if payload.done {
+        *progress = None;
+    } else {
+        *progress = Some(payload.clone());
+    }
+}
+
+fn clear_index_progress() {
+    *lock_index_progress() = None;
+}
+
+fn lock_index_progress() -> std::sync::MutexGuard<'static, Option<DictionaryIndexProgress>> {
+    static INDEX_PROGRESS: OnceLock<Mutex<Option<DictionaryIndexProgress>>> = OnceLock::new();
+    INDEX_PROGRESS
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn mdx_name_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("MDX Dictionary")
+        .to_string()
 }
 
 fn is_indexable_mdx_headword(headword: &str) -> bool {
@@ -722,12 +942,20 @@ fn build_profile(
     let mut antonyms = Vec::new();
     let mut sources = BTreeSet::new();
     let mut memory_hint = None;
+    let mut phonetics = Phonetics::default();
+    let mut forms = WordForms::default();
+    let mut exam_tags = Vec::new();
 
     for card in &imported_cards {
         sources.insert(card.dictionary_name.clone());
     }
 
     if let Some(first_card) = imported_cards.first() {
+        if first_card.dictionary_name == BUILTIN_ECDICT_NAME {
+            phonetics = parse_ecdict_phonetics(&first_card.plain_text);
+            forms = parse_ecdict_forms(&first_card.plain_text);
+            exam_tags = parse_ecdict_tags(&first_card.plain_text);
+        }
         definitions.extend(parse_plain_text_definitions(
             &first_card.plain_text,
             &first_card.dictionary_name,
@@ -760,17 +988,35 @@ fn build_profile(
         source,
         lemma,
         translated,
-        phonetics: Phonetics::default(),
+        phonetics,
         definitions,
-        forms: WordForms::default(),
+        forms,
         examples,
         phrases,
         synonyms,
         antonyms,
         memory_hint,
-        exam_tags: Vec::new(),
+        exam_tags,
         imported_cards,
         sources: sources.into_iter().collect(),
+    }
+}
+
+fn push_optional_lines(lines: &mut Vec<String>, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.extend(
+            value
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(ToString::to_string),
+        );
+    }
+}
+
+fn push_labeled_line(lines: &mut Vec<String>, label: &str, value: Option<&str>) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        lines.push(format!("{label}: {value}"));
     }
 }
 
@@ -779,7 +1025,7 @@ fn parse_plain_text_definitions(text: &str, source: &str) -> Vec<Definition> {
         .flat_map(|line| line.split("；"))
         .filter_map(|chunk| {
             let trimmed = chunk.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || is_ecdict_metadata_line(trimmed) {
                 return None;
             }
             let (part_of_speech, meaning) = split_definition_line(trimmed);
@@ -794,6 +1040,68 @@ fn parse_plain_text_definitions(text: &str, source: &str) -> Vec<Definition> {
         })
         .take(6)
         .collect()
+}
+
+fn is_ecdict_metadata_line(line: &str) -> bool {
+    line.strip_prefix("phonetic:")
+        .or_else(|| line.strip_prefix("exchange:"))
+        .or_else(|| line.strip_prefix("tag:"))
+        .or_else(|| line.strip_prefix("pos:"))
+        .is_some()
+}
+
+fn parse_ecdict_phonetics(text: &str) -> Phonetics {
+    let phonetic = metadata_line_value(text, "phonetic").map(ToString::to_string);
+    Phonetics {
+        uk: phonetic.clone(),
+        us: phonetic,
+        audio: None,
+    }
+}
+
+fn parse_ecdict_forms(text: &str) -> WordForms {
+    let mut forms = WordForms::default();
+    let Some(exchange) = metadata_line_value(text, "exchange") else {
+        return forms;
+    };
+    for item in exchange.split('/') {
+        let Some((kind, value)) = item.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        match kind {
+            "p" => forms.past = Some(value.to_string()),
+            "d" => forms.past_participle = Some(value.to_string()),
+            "i" => forms.present_participle = Some(value.to_string()),
+            "3" => forms.third_person = Some(value.to_string()),
+            "s" => forms.plural = Some(value.to_string()),
+            "r" => forms.comparative = Some(value.to_string()),
+            "t" => forms.superlative = Some(value.to_string()),
+            _ => {}
+        }
+    }
+    forms
+}
+
+fn parse_ecdict_tags(text: &str) -> Vec<String> {
+    metadata_line_value(text, "tag")
+        .map(|tags| {
+            tags.split_whitespace()
+                .filter(|tag| !tag.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn metadata_line_value<'a>(text: &'a str, label: &str) -> Option<&'a str> {
+    let prefix = format!("{label}:");
+    text.lines()
+        .find_map(|line| line.trim().strip_prefix(&prefix).map(str::trim))
+        .filter(|value| !value.is_empty())
 }
 
 fn split_definition_line(line: &str) -> (String, String) {
@@ -898,7 +1206,7 @@ fn decode_basic_entities(text: &str) -> String {
         .replace("&#39;", "'")
 }
 
-fn builtin_mdx_path(app: &AppHandle) -> Result<Option<PathBuf>, DictionaryError> {
+fn builtin_ecdict_db_path(app: &AppHandle) -> Result<Option<PathBuf>, DictionaryError> {
     let resource_path = app.path().resource_dir()?.join(BUILTIN_ECDICT_RESOURCE);
     if resource_path.is_file() {
         return Ok(Some(resource_path));
@@ -910,6 +1218,15 @@ fn builtin_mdx_path(app: &AppHandle) -> Result<Option<PathBuf>, DictionaryError>
     }
 
     Ok(None)
+}
+
+fn ecdict_entry_count(path: &Path) -> Result<i64, DictionaryError> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.query_row("select count(*) from stardict", [], |row| row.get(0))
+        .map_err(DictionaryError::from)
 }
 
 fn dictionary_db_path(app: &AppHandle) -> Result<PathBuf, DictionaryError> {
@@ -947,10 +1264,12 @@ pub enum DictionaryError {
     Io(#[from] std::io::Error),
     #[error("词典路径错误：{0}")]
     Tauri(#[from] tauri::Error),
-    #[error("内置 ECDICT MDX 未安装，请将 ecdict.mdx 放入应用资源目录后重建索引")]
-    MissingBuiltinMdx,
+    #[error("内置 ECDICT SQLite 未安装，请将 ecdict.db 放入应用资源目录")]
+    MissingBuiltinDb,
     #[error("内置词典不能删除")]
     CannotDeleteBuiltin,
+    #[error("词典索引任务正在运行：{0}")]
+    IndexTaskAlreadyRunning(String),
     #[error("MDX 词典解析错误：{0}")]
     Mdict(String),
 }
@@ -958,8 +1277,8 @@ pub enum DictionaryError {
 #[cfg(test)]
 mod tests {
     use super::{
-        html_to_safe_text, is_indexable_mdx_headword, parse_plain_text_definitions, trim_to_chars,
-        DictionaryStore,
+        html_to_safe_text, is_indexable_mdx_headword, parse_ecdict_forms, parse_ecdict_phonetics,
+        parse_ecdict_tags, parse_plain_text_definitions, trim_to_chars, DictionaryStore,
     };
     use rusqlite::Connection;
 
@@ -993,6 +1312,24 @@ mod tests {
         assert!(!is_indexable_mdx_headword("look up"));
         assert!(!is_indexable_mdx_headword("hello2"));
         assert!(!is_indexable_mdx_headword("中文"));
+    }
+
+    #[test]
+    fn parses_ecdict_metadata_without_polluting_definitions() {
+        let text =
+            "n. 跑；赛跑\nphonetic: rʌn\nexchange: p:ran/i:running/d:run/3:runs/s:runs\ntag: zk gk";
+        let definitions = parse_plain_text_definitions(text, "ECDICT");
+        let phonetics = parse_ecdict_phonetics(text);
+        let forms = parse_ecdict_forms(text);
+        let tags = parse_ecdict_tags(text);
+
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(definitions[0].meaning, "跑");
+        assert_eq!(phonetics.uk.as_deref(), Some("rʌn"));
+        assert_eq!(forms.past.as_deref(), Some("ran"));
+        assert_eq!(forms.present_participle.as_deref(), Some("running"));
+        assert_eq!(forms.third_person.as_deref(), Some("runs"));
+        assert_eq!(tags, vec!["zk", "gk"]);
     }
 
     #[test]

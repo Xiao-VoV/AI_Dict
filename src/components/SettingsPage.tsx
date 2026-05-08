@@ -59,7 +59,7 @@ export function SettingsPage({
   }, [t, testStatus]);
 
   useEffect(() => {
-    void refreshDictionaries();
+    void loadDictionaryState();
   }, []);
 
   useEffect(() => {
@@ -67,6 +67,14 @@ export function SettingsPage({
       "dictionary-index-progress",
       (event) => {
         setIndexProgress(event.payload);
+        setDictionaryBusy(!event.payload.done);
+        if (!event.payload.done) {
+          setDictionaryMessage(t.dictionaryImporting);
+          return;
+        }
+        if (event.payload.phase === "done") {
+          void refreshDictionaries();
+        }
       },
     );
 
@@ -85,6 +93,24 @@ export function SettingsPage({
     } catch (message) {
       setTestStatus("error");
       setTestMessage(String(message));
+    }
+  }
+
+  async function loadDictionaryState() {
+    try {
+      const activeProgress = await invoke<DictionaryIndexProgress | null>(
+        "get_dictionary_index_progress",
+      );
+      if (activeProgress && !activeProgress.done) {
+        setIndexProgress(activeProgress);
+        setDictionaryBusy(true);
+        setDictionaryMessage(t.dictionaryImporting);
+        return;
+      }
+      setDictionaryBusy(false);
+      await refreshDictionaries();
+    } catch (message) {
+      setDictionaryMessage(String(message));
     }
   }
 
@@ -107,8 +133,21 @@ export function SettingsPage({
     await runDictionaryImport("import_mdict", { mdxPath: selected }, name);
   }
 
-  async function reindexBuiltinDictionary() {
-    await runDictionaryImport("reindex_builtin_dictionary", {}, "ECDICT");
+  async function refreshBuiltinDictionary() {
+    setDictionaryBusy(true);
+    setDictionaryMessage(t.dictionaryRefreshing);
+    setIndexProgress(null);
+    try {
+      const summary = await invoke<ImportSummary>("reindex_builtin_dictionary");
+      setDictionaryMessage(
+        `${t.dictionaryRefreshSuccess}: ${summary.name} (${summary.importedEntries})`,
+      );
+      await refreshDictionaries();
+    } catch (message) {
+      setDictionaryMessage(String(message));
+    } finally {
+      setDictionaryBusy(false);
+    }
   }
 
   async function runDictionaryImport(
@@ -116,11 +155,15 @@ export function SettingsPage({
     payload: Record<string, unknown>,
     name: string,
   ) {
+    if (dictionaryBusy || (indexProgress && !indexProgress.done)) {
+      setDictionaryMessage(t.dictionaryTaskAlreadyRunning);
+      return;
+    }
     setDictionaryBusy(true);
     setDictionaryMessage(t.dictionaryImporting);
     setIndexProgress({
       name,
-      kind: command === "reindex_builtin_dictionary" ? "builtin_mdx" : "user_mdx",
+      kind: "user_mdx",
       phase: "opening",
       processedEntries: 0,
       totalEntries: 0,
@@ -308,12 +351,12 @@ export function SettingsPage({
                 {t.importMdx}
               </button>
               <button
-                onClick={reindexBuiltinDictionary}
+                onClick={refreshBuiltinDictionary}
                 disabled={dictionaryBusy}
                 className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-amber px-4 text-sm font-medium text-white transition hover:bg-moss disabled:cursor-not-allowed disabled:opacity-60"
               >
                 <Database className="h-4 w-4" />
-                {t.reindexBuiltinDictionary}
+                {t.refreshBuiltinDictionary}
               </button>
             </div>
             {dictionaryMessage ? (
@@ -359,7 +402,7 @@ export function SettingsPage({
                         {dictionary.name}
                       </p>
                       <p className="text-xs text-moss">
-                        {dictionary.kind === "builtin_mdx"
+                        {dictionary.kind === "builtin_sqlite" || dictionary.kind === "builtin_mdx"
                           ? t.builtinDictionary
                           : t.userDictionary}{" "}
                         · {dictionary.entryCount}

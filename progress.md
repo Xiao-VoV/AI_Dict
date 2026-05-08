@@ -61,6 +61,17 @@
 - 调整索引循环：改为按 `keyword_list()[i]` 克隆词头并 `fetch`，避免每个词头再次 `lookup` 二分查找；同时只索引英文单词类词头（ASCII 字母、撇号、连字符），跳过短语、数字、中文等不参与当前单词查询路由的词头，避免 ECDICT 超大 keyword 集合拖垮索引。
 - 新增词头过滤单元测试；重新验证：`npm run build`、`cargo check`、`cargo test` 通过。
 
+## 2026-05-08
+- 修复设置页重复触发词典索引的问题：后端新增进程内索引任务状态和单任务锁，`import_mdict` / `reindex_builtin_dictionary` 在已有任务运行时会直接返回“词典索引任务正在运行”，不再启动第二个 SQLite 写入任务。
+- 新增后端命令 `get_dictionary_index_progress`，设置页首次进入时先查询当前索引状态；如果已有任务运行，只恢复进度条和忙碌状态，不刷新词典列表，避免长事务期间 `list_dictionaries` 触发 `database is locked`。
+- 设置页监听 `dictionary-index-progress` 后同步更新按钮禁用状态；索引完成时再刷新词典列表。
+- 重新验证：`npm run build`、`cargo check`、`cargo test` 通过。
+- 调整内置词典策略：发现 `src-tauri/resources/dicts/ecdict.db` 已提供 ECDICT 预构建 SQLite，表 `stardict` 有 3,402,564 条记录和 `word/sw` 索引；内置 ECDICT 改为直接只读查询该 SQLite，不再现场从 MDX 构建索引。
+- 后端词典 metadata 将内置词典迁移为 `builtin_sqlite`，保留旧 `builtin_mdx` 的列表/删除兼容；用户导入仍只支持 MDX，并继续写入应用自己的 `mdx_entries`。
+- 查询结果从 ECDICT SQLite 读取 `translation`、`definition`、`phonetic`、`exchange`、`tag`，并解析为释义、音标、词形和考试标签；用户 MDX 结果仍作为补充卡片展示。
+- 设置页将“重建内置索引”改为“刷新内置词典”，只更新/注册内置 SQLite metadata；MDX 导入继续显示后台索引进度。
+- 新增 ECDICT metadata 解析单元测试；重新验证：`npm run build`、`cargo check`、`cargo test` 通过。
+
 ## 待办
 - 运行 `npm run tauri:dev` 做真实桌面取词体验测试。
 - 调研并选择可分发词典数据源，替换当前示例词典。

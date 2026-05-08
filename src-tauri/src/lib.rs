@@ -121,6 +121,11 @@ async fn reindex_builtin_dictionary(
 }
 
 #[tauri::command]
+fn get_dictionary_index_progress() -> Option<dictionary::DictionaryIndexProgress> {
+    dictionary::current_index_progress()
+}
+
+#[tauri::command]
 fn list_dictionaries(app: tauri::AppHandle) -> Result<Vec<dictionary::DictionaryMetadata>, String> {
     log::debug!("list_dictionaries command started");
     dictionary::list_dictionaries(&app).map_err(|error| {
@@ -204,6 +209,7 @@ pub fn run() {
             test_ai_connection,
             import_mdict,
             reindex_builtin_dictionary,
+            get_dictionary_index_progress,
             list_dictionaries,
             delete_dictionary
         ])
