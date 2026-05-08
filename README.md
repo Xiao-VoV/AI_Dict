@@ -1,6 +1,6 @@
 # 划词翻译
 
-基于 Tauri v2 + React + TypeScript + Tailwind CSS 的跨平台划词翻译 MVP。
+基于 Tauri v2 + React + TypeScript + Tailwind CSS 的跨平台AI智能词典翻译 MVP。
 
 ![alt text](images/image.png)
 
