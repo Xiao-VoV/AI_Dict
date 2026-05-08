@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   ArrowLeft,
@@ -15,7 +16,12 @@ import {
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useState } from "react";
 import { normalizeUiLanguage, type Messages } from "../i18n/messages";
-import type { AppSettings, DictionaryMetadata, ImportSummary } from "../types";
+import type {
+  AppSettings,
+  DictionaryIndexProgress,
+  DictionaryMetadata,
+  ImportSummary,
+} from "../types";
 import { Field } from "./Field";
 
 type TestStatus = "idle" | "testing" | "success" | "error";
@@ -42,6 +48,7 @@ export function SettingsPage({
   const [dictionaries, setDictionaries] = useState<DictionaryMetadata[]>([]);
   const [dictionaryBusy, setDictionaryBusy] = useState(false);
   const [dictionaryMessage, setDictionaryMessage] = useState("");
+  const [indexProgress, setIndexProgress] = useState<DictionaryIndexProgress | null>(null);
 
   useEffect(() => {
     if (testStatus === "idle") {
@@ -53,6 +60,19 @@ export function SettingsPage({
 
   useEffect(() => {
     void refreshDictionaries();
+  }, []);
+
+  useEffect(() => {
+    const unlistenProgress = listen<DictionaryIndexProgress>(
+      "dictionary-index-progress",
+      (event) => {
+        setIndexProgress(event.payload);
+      },
+    );
+
+    return () => {
+      void unlistenProgress.then((unlisten) => unlisten());
+    };
   }, []);
 
   async function testConnection() {
@@ -83,16 +103,31 @@ export function SettingsPage({
       filters: [{ name: "MDX Dictionary", extensions: ["mdx"] }],
     });
     if (typeof selected !== "string") return;
-    await runDictionaryImport("import_mdict", { mdxPath: selected });
+    const name = selected.split(/[\\/]/).pop()?.replace(/\.mdx$/i, "") || t.importMdx;
+    await runDictionaryImport("import_mdict", { mdxPath: selected }, name);
   }
 
   async function reindexBuiltinDictionary() {
-    await runDictionaryImport("reindex_builtin_dictionary", {});
+    await runDictionaryImport("reindex_builtin_dictionary", {}, "ECDICT");
   }
 
-  async function runDictionaryImport(command: string, payload: Record<string, unknown>) {
+  async function runDictionaryImport(
+    command: string,
+    payload: Record<string, unknown>,
+    name: string,
+  ) {
     setDictionaryBusy(true);
     setDictionaryMessage(t.dictionaryImporting);
+    setIndexProgress({
+      name,
+      kind: command === "reindex_builtin_dictionary" ? "builtin_mdx" : "user_mdx",
+      phase: "opening",
+      processedEntries: 0,
+      totalEntries: 0,
+      importedEntries: 0,
+      skippedEntries: 0,
+      done: false,
+    });
     try {
       const summary = await invoke<ImportSummary>(command, payload);
       setDictionaryMessage(
@@ -108,6 +143,7 @@ export function SettingsPage({
 
   async function deleteDictionary(dictionaryId: number) {
     setDictionaryBusy(true);
+    setIndexProgress(null);
     try {
       await invoke("delete_dictionary", { dictionaryId });
       await refreshDictionaries();
@@ -117,6 +153,13 @@ export function SettingsPage({
       setDictionaryBusy(false);
     }
   }
+
+  const progressPercent =
+    indexProgress && indexProgress.totalEntries > 0
+      ? Math.round((indexProgress.processedEntries / indexProgress.totalEntries) * 100)
+      : 0;
+  const progressLabel = indexProgress ? dictionaryProgressLabel(indexProgress.phase, t) : "";
+  const progressWidth = indexProgress?.totalEntries ? `${progressPercent}%` : "100%";
 
   return (
     <main className="app-shell">
@@ -276,6 +319,30 @@ export function SettingsPage({
             {dictionaryMessage ? (
               <p className="mt-3 text-sm text-moss">{dictionaryMessage}</p>
             ) : null}
+            {indexProgress ? (
+              <div className="mt-3 rounded-md bg-paper p-3">
+                <div className="mb-2 flex items-center justify-between gap-3 text-xs text-moss">
+                  <span className="min-w-0 truncate">
+                    {t.dictionaryIndexProgress}: {indexProgress.name} · {progressLabel}
+                  </span>
+                  <span className="shrink-0 tabular-nums">
+                    {indexProgress.totalEntries > 0
+                      ? `${indexProgress.processedEntries} / ${indexProgress.totalEntries}`
+                      : progressLabel}
+                  </span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-line">
+                  <div
+                    className={`h-full rounded-full bg-moss transition-all ${
+                      indexProgress.totalEntries === 0 && !indexProgress.done
+                        ? "animate-pulse"
+                        : ""
+                    }`}
+                    style={{ width: progressWidth }}
+                  />
+                </div>
+              </div>
+            ) : null}
             <div className="mt-4 grid gap-2">
               {dictionaries.length === 0 ? (
                 <p className="rounded-md bg-paper p-3 text-sm text-moss">
@@ -320,4 +387,14 @@ export function SettingsPage({
       </section>
     </main>
   );
+}
+
+function dictionaryProgressLabel(
+  phase: DictionaryIndexProgress["phase"],
+  t: Messages,
+) {
+  if (phase === "done") return t.dictionaryPhaseDone;
+  if (phase === "error") return t.dictionaryPhaseError;
+  if (phase === "indexing") return t.dictionaryPhaseIndexing;
+  return t.dictionaryPhaseOpening;
 }

@@ -60,6 +60,17 @@ export type ImportSummary = {
   skippedEntries: number;
 };
 
+export type DictionaryIndexProgress = {
+  name: string;
+  kind: string;
+  phase: "opening" | "indexing" | "done" | "error";
+  processedEntries: number;
+  totalEntries: number;
+  importedEntries: number;
+  skippedEntries: number;
+  done: boolean;
+};
+
 export type LookupResult =
   | { kind: "word"; profile: WordProfile }
   | { kind: "translation"; source: string; translated: string };

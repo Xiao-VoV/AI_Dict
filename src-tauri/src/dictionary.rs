@@ -1,6 +1,6 @@
 use crate::{ai, settings};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use rust_mdict::Mdx;
-use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const BUILTIN_ECDICT_KEY: &str = "ecdict";
 const BUILTIN_ECDICT_NAME: &str = "ECDICT";
@@ -16,6 +16,7 @@ const BUILTIN_ECDICT_RESOURCE: &str = "resources/dicts/ecdict.mdx";
 const AI_CARD_PROMPT_VERSION: &str = "word-card-v2-mdx";
 const MAX_CARD_TEXT_CHARS: usize = 1_200;
 const MAX_IMPORTED_CARDS: usize = 5;
+const INDEX_PROGRESS_BATCH_SIZE: usize = 2_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +112,19 @@ pub struct ImportSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DictionaryIndexProgress {
+    pub name: String,
+    pub kind: String,
+    pub phase: String,
+    pub processed_entries: usize,
+    pub total_entries: usize,
+    pub imported_entries: usize,
+    pub skipped_entries: usize,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AiWordCard {
     pub short_definition: Option<String>,
     #[serde(default)]
@@ -194,13 +208,13 @@ pub async fn lookup_word_profile(
 }
 
 pub fn import_mdict(app: &AppHandle, mdx_path: &str) -> Result<ImportSummary, DictionaryError> {
-    let db = DictionaryStore::open(app)?;
+    let mut db = DictionaryStore::open(app)?;
     db.ensure_schema()?;
-    db.import_mdx_dictionary(mdx_path, DictionaryKind::UserMdx)
+    db.import_mdx_dictionary(app, mdx_path, DictionaryKind::UserMdx)
 }
 
 pub fn reindex_builtin_dictionary(app: &AppHandle) -> Result<ImportSummary, DictionaryError> {
-    let db = DictionaryStore::open(app)?;
+    let mut db = DictionaryStore::open(app)?;
     db.ensure_schema()?;
     db.reindex_builtin_dictionary(app)
 }
@@ -305,8 +319,10 @@ impl DictionaryStore {
                 return Ok(());
             }
         }
-        self.conn
-            .execute(&format!("alter table {table} add column {column} {definition}"), [])?;
+        self.conn.execute(
+            &format!("alter table {table} add column {column} {definition}"),
+            [],
+        )?;
         Ok(())
     }
 
@@ -322,25 +338,27 @@ impl DictionaryStore {
             .optional()?;
 
         if existing.is_none() {
-            if let Some(path) = builtin_mdx_path(app)? {
-                self.import_builtin_dictionary(&path)?;
-            } else {
+            let path = builtin_mdx_path(app)?.map(|path| path.to_string_lossy().to_string());
+            if path.is_none() {
                 log::warn!(
                     "built-in ECDICT MDX resource not found; expected {}",
                     BUILTIN_ECDICT_RESOURCE
                 );
-                self.create_dictionary(
-                    BUILTIN_ECDICT_NAME,
-                    DictionaryKind::BuiltinMdx.as_str(),
-                    None,
-                    Some(BUILTIN_ECDICT_KEY),
-                )?;
             }
+            self.create_dictionary(
+                BUILTIN_ECDICT_NAME,
+                DictionaryKind::BuiltinMdx.as_str(),
+                path.as_deref(),
+                Some(BUILTIN_ECDICT_KEY),
+            )?;
         }
         Ok(())
     }
 
-    fn reindex_builtin_dictionary(&self, app: &AppHandle) -> Result<ImportSummary, DictionaryError> {
+    fn reindex_builtin_dictionary(
+        &mut self,
+        app: &AppHandle,
+    ) -> Result<ImportSummary, DictionaryError> {
         self.ensure_schema()?;
         let Some(path) = builtin_mdx_path(app)? else {
             self.ensure_builtin_dictionary(app)?;
@@ -356,17 +374,24 @@ impl DictionaryStore {
             )
             .optional()?
         {
-            self.conn
-                .execute("delete from mdx_entries where dictionary_id = ?1", [dictionary_id])?;
+            self.conn.execute(
+                "delete from mdx_entries where dictionary_id = ?1",
+                [dictionary_id],
+            )?;
             self.conn
                 .execute("delete from dictionaries where id = ?1", [dictionary_id])?;
         }
 
-        self.import_builtin_dictionary(&path)
+        self.import_builtin_dictionary(app, &path)
     }
 
-    fn import_builtin_dictionary(&self, path: &Path) -> Result<ImportSummary, DictionaryError> {
+    fn import_builtin_dictionary(
+        &mut self,
+        app: &AppHandle,
+        path: &Path,
+    ) -> Result<ImportSummary, DictionaryError> {
         self.import_mdx_dictionary_at_path(
+            app,
             path,
             BUILTIN_ECDICT_NAME,
             DictionaryKind::BuiltinMdx,
@@ -375,7 +400,8 @@ impl DictionaryStore {
     }
 
     fn import_mdx_dictionary(
-        &self,
+        &mut self,
+        app: &AppHandle,
         mdx_path: &str,
         kind: DictionaryKind,
     ) -> Result<ImportSummary, DictionaryError> {
@@ -384,48 +410,104 @@ impl DictionaryStore {
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("MDX Dictionary");
-        self.import_mdx_dictionary_at_path(path, name, kind, None)
+        self.import_mdx_dictionary_at_path(app, path, name, kind, None)
     }
 
     fn import_mdx_dictionary_at_path(
-        &self,
+        &mut self,
+        app: &AppHandle,
         path: &Path,
         name: &str,
         kind: DictionaryKind,
         builtin_key: Option<&str>,
     ) -> Result<ImportSummary, DictionaryError> {
         let path_string = path.to_string_lossy().to_string();
-        let mut mdx = Mdx::new(path).map_err(|error| DictionaryError::Mdict(error.to_string()))?;
+        let kind_label = kind.as_str().to_string();
+
+        emit_index_progress(app, name, &kind_label, "opening", 0, 0, 0, 0, false);
+        let mut mdx = match Mdx::new(path) {
+            Ok(mdx) => mdx,
+            Err(error) => {
+                emit_index_progress(app, name, &kind_label, "error", 0, 0, 0, 0, true);
+                return Err(DictionaryError::Mdict(error.to_string()));
+            }
+        };
+
         let dictionary_id =
             self.create_dictionary(name, kind.as_str(), Some(&path_string), builtin_key)?;
 
         let mut imported_entries = 0usize;
         let mut skipped_entries = 0usize;
-        let keywords: Vec<String> = mdx.keywords().into_iter().map(str::to_string).collect();
+        let total_entries = mdx.keyword_count();
 
-        for keyword in keywords {
-            if let Some(result) = mdx.lookup(&keyword) {
+        emit_index_progress(
+            app,
+            name,
+            &kind_label,
+            "indexing",
+            0,
+            total_entries,
+            imported_entries,
+            skipped_entries,
+            false,
+        );
+
+        let transaction = self.conn.transaction()?;
+        for index in 0..total_entries {
+            let keyword = mdx.keyword_list()[index].clone();
+            if !is_indexable_mdx_headword(&keyword.key_text) {
+                skipped_entries += 1;
+            } else if let Some(result) = mdx.fetch(&keyword) {
                 let plain_text = html_to_safe_text(&result.definition);
                 if plain_text.is_empty() {
                     skipped_entries += 1;
-                    continue;
+                } else {
+                    insert_mdx_entry(&transaction, dictionary_id, &result.key_text, &plain_text)?;
+                    imported_entries += 1;
                 }
-                self.insert_mdx_entry(dictionary_id, &result.key_text, &plain_text)?;
-                imported_entries += 1;
             } else {
                 skipped_entries += 1;
             }
-        }
 
-        self.conn.execute(
+            let processed_entries = index + 1;
+            if processed_entries == total_entries
+                || processed_entries % INDEX_PROGRESS_BATCH_SIZE == 0
+            {
+                emit_index_progress(
+                    app,
+                    name,
+                    &kind_label,
+                    "indexing",
+                    processed_entries,
+                    total_entries,
+                    imported_entries,
+                    skipped_entries,
+                    false,
+                );
+            }
+        }
+        transaction.execute(
             "update dictionaries set entry_count = ?1 where id = ?2",
             params![imported_entries as i64, dictionary_id],
         )?;
+        transaction.commit()?;
+
+        emit_index_progress(
+            app,
+            name,
+            &kind_label,
+            "done",
+            total_entries,
+            total_entries,
+            imported_entries,
+            skipped_entries,
+            true,
+        );
 
         Ok(ImportSummary {
             dictionary_id: Some(dictionary_id),
             name: name.to_string(),
-            kind: kind.as_str().to_string(),
+            kind: kind_label,
             imported_entries,
             skipped_entries,
         })
@@ -444,23 +526,6 @@ impl DictionaryStore {
             params![name, kind, path, now_ts(), builtin_key],
         )?;
         Ok(self.conn.last_insert_rowid())
-    }
-
-    fn insert_mdx_entry(
-        &self,
-        dictionary_id: i64,
-        headword: &str,
-        plain_text: &str,
-    ) -> Result<(), DictionaryError> {
-        self.conn.execute(
-            r#"
-            insert into mdx_entries
-              (dictionary_id, headword, normalized_word, plain_text)
-            values (?1, ?2, ?3, ?4)
-            "#,
-            params![dictionary_id, headword, normalize_word(headword), plain_text],
-        )?;
-        Ok(())
     }
 
     fn lookup_cards(&self, word: &str) -> Result<Vec<ImportedCard>, DictionaryError> {
@@ -576,12 +641,71 @@ impl DictionaryStore {
             return Err(DictionaryError::CannotDeleteBuiltin);
         }
 
-        self.conn
-            .execute("delete from mdx_entries where dictionary_id = ?1", [dictionary_id])?;
+        self.conn.execute(
+            "delete from mdx_entries where dictionary_id = ?1",
+            [dictionary_id],
+        )?;
         self.conn
             .execute("delete from dictionaries where id = ?1", [dictionary_id])?;
         Ok(())
     }
+}
+
+fn insert_mdx_entry(
+    transaction: &Transaction<'_>,
+    dictionary_id: i64,
+    headword: &str,
+    plain_text: &str,
+) -> Result<(), DictionaryError> {
+    transaction.execute(
+        r#"
+        insert into mdx_entries
+          (dictionary_id, headword, normalized_word, plain_text)
+        values (?1, ?2, ?3, ?4)
+        "#,
+        params![
+            dictionary_id,
+            headword,
+            normalize_word(headword),
+            plain_text
+        ],
+    )?;
+    Ok(())
+}
+
+fn emit_index_progress(
+    app: &AppHandle,
+    name: &str,
+    kind: &str,
+    phase: &str,
+    processed_entries: usize,
+    total_entries: usize,
+    imported_entries: usize,
+    skipped_entries: usize,
+    done: bool,
+) {
+    let payload = DictionaryIndexProgress {
+        name: name.to_string(),
+        kind: kind.to_string(),
+        phase: phase.to_string(),
+        processed_entries,
+        total_entries,
+        imported_entries,
+        skipped_entries,
+        done,
+    };
+    if let Err(error) = app.emit("dictionary-index-progress", payload) {
+        log::warn!("failed to emit dictionary index progress: {error}");
+    }
+}
+
+fn is_indexable_mdx_headword(headword: &str) -> bool {
+    let normalized = normalize_word(headword);
+    !normalized.is_empty()
+        && normalized.len() <= 80
+        && normalized
+            .chars()
+            .all(|char| char.is_ascii_alphabetic() || char == '\'' || char == '-')
 }
 
 fn build_profile(
@@ -833,7 +957,10 @@ pub enum DictionaryError {
 
 #[cfg(test)]
 mod tests {
-    use super::{html_to_safe_text, parse_plain_text_definitions, trim_to_chars, DictionaryStore};
+    use super::{
+        html_to_safe_text, is_indexable_mdx_headword, parse_plain_text_definitions, trim_to_chars,
+        DictionaryStore,
+    };
     use rusqlite::Connection;
 
     #[test]
@@ -856,6 +983,16 @@ mod tests {
     fn trims_by_chars() {
         assert_eq!(trim_to_chars("abcdef", 3), "abc…");
         assert_eq!(trim_to_chars("abc", 3), "abc");
+    }
+
+    #[test]
+    fn filters_mdx_headwords_to_single_english_words() {
+        assert!(is_indexable_mdx_headword("running"));
+        assert!(is_indexable_mdx_headword("mother-in-law"));
+        assert!(is_indexable_mdx_headword("don't"));
+        assert!(!is_indexable_mdx_headword("look up"));
+        assert!(!is_indexable_mdx_headword("hello2"));
+        assert!(!is_indexable_mdx_headword("中文"));
     }
 
     #[test]

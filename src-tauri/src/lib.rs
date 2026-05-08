@@ -84,26 +84,40 @@ async fn test_ai_connection(settings: settings::AppSettings) -> Result<(), Strin
 }
 
 #[tauri::command]
-fn import_mdict(
+async fn import_mdict(
     app: tauri::AppHandle,
     mdx_path: String,
 ) -> Result<dictionary::ImportSummary, String> {
     log::debug!("import_mdict command started; mdx_path={mdx_path}");
-    dictionary::import_mdict(&app, &mdx_path).map_err(|error| {
-        log::warn!("import_mdict command failed: {error}");
-        error.to_string()
+    tauri::async_runtime::spawn_blocking(move || {
+        dictionary::import_mdict(&app, &mdx_path).map_err(|error| {
+            log::warn!("import_mdict command failed: {error}");
+            error.to_string()
+        })
     })
+    .await
+    .map_err(|error| {
+        log::warn!("import_mdict background task failed: {error}");
+        error.to_string()
+    })?
 }
 
 #[tauri::command]
-fn reindex_builtin_dictionary(
+async fn reindex_builtin_dictionary(
     app: tauri::AppHandle,
 ) -> Result<dictionary::ImportSummary, String> {
     log::debug!("reindex_builtin_dictionary command started");
-    dictionary::reindex_builtin_dictionary(&app).map_err(|error| {
-        log::warn!("reindex_builtin_dictionary command failed: {error}");
-        error.to_string()
+    tauri::async_runtime::spawn_blocking(move || {
+        dictionary::reindex_builtin_dictionary(&app).map_err(|error| {
+            log::warn!("reindex_builtin_dictionary command failed: {error}");
+            error.to_string()
+        })
     })
+    .await
+    .map_err(|error| {
+        log::warn!("reindex_builtin_dictionary background task failed: {error}");
+        error.to_string()
+    })?
 }
 
 #[tauri::command]

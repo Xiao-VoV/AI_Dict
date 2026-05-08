@@ -42,6 +42,9 @@
 - OpenAI-compatible Base URL 应配置为 API base，例如 `https://api.openai.com/v1`；如果用户误填到 `/chat/completions`，当前实现会自动裁剪该后缀。
 - 某些 OpenAI-compatible 服务会返回非标准响应，例如 `message.role` 为空字符串；`async-openai` 的强类型 `CreateChatCompletionResponse` 会因此反序列化失败。当前使用 `byot` feature 让库负责请求与鉴权，但用宽松响应结构只读取 `choices[].message.content`。
 - 使用 `tauri-plugin-log` 写 stdout 和系统日志目录，debug 构建默认 Debug 级别，release 构建默认 Info 级别。日志应避免记录 API Key 和完整原文，只记录长度、路由、模型、Base URL 等必要排障信息。
+- MDX 索引已经在后台线程执行，但真实大词典仍需要可见进度；当前通过 `dictionary-index-progress` Tauri event 从 Rust 后端推送索引进度，前端设置页监听后展示进度条。
+- 当前 MDX 读取使用 `rs-mdict = 0.1.1`，SQLite 写入使用 `rusqlite`。`rusqlite` 是成熟 SQLite 绑定；`rs-mdict` 能解析/查询 MDX，但版本早、生态成熟度有限，不应视为“成熟 MDX -> SQLite 转换器”。当前转换逻辑是应用自己写的：用 `rs-mdict` 读词头/释义，再用 `rusqlite` 写入自有表。
+- 现有 `src-tauri/resources/dicts/ecdict.mdx` 约 93MB，`rs-mdict` CLI 探针显示 3,402,564 个 keyword，`Encryption: KeyInfoBlock`。全量逐词头 `lookup` 会非常慢；索引时应尽量过滤当前单词查询不需要的词头，并长期考虑使用更成熟的离线构建链路预生成 SQLite。
 
 ## 参考来源
 - Tauri global-shortcut 插件文档：https://v2.tauri.app/zh-cn/plugin/global-shortcut/

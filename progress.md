@@ -49,6 +49,17 @@
 - 重新验证：`npm run build`、`cargo test`、`cargo check` 通过。
 - 修复旧数据库迁移错误：老版本 `dictionaries` 表没有 `builtin_key` 列，原实现先创建 `builtin_key` 唯一索引再补列导致重建内置索引失败；已改为先建/补列，再创建索引，并新增内存库迁移回归测试。
 - 重新验证：`cargo test`、`cargo check`、`npm run build` 通过。
+- 修复建立 MDX 索引时 UI 卡顿：`import_mdict` 与 `reindex_builtin_dictionary` 改为 async command，并通过 `tauri::async_runtime::spawn_blocking` 在线程池执行同步 MDX 解析/SQLite 写入。
+- 避免刷新词典列表时自动触发内置 MDX 全量索引；现在只注册内置词典占位，真正索引由“重建内置索引”按钮触发。
+- 优化导入性能：MDX 条目写入 SQLite 改为单事务批量提交，减少逐条 autocommit 开销。
+- 重新验证：`cargo test`、`cargo check`、`npm run build` 通过；清理后 `cargo check` 无 warning。
+- 增加 MDX 索引进度事件：后端导入/重建索引过程中 emit `dictionary-index-progress`，包含词典名、类型、已处理词头、总词头、已导入和跳过数量。
+- 设置页监听 `dictionary-index-progress`，在 MDX 导入和内置索引重建时显示进度条和当前处理数量；仍保持一次只执行一个词典任务。
+- 重新验证：`npm run build`、`cargo check`、`cargo test` 通过。
+- 复现内置 `ecdict.mdx` 解析现象：当前 93MB MDX 由 `rs-mdict` 探针读取到 3,402,564 个 keyword，打开/解析阶段耗时较明显；此前进度事件只在读完 keyword 后发出，所以会出现长时间没有进度条。
+- 修复索引可见性：点击导入/重建后前端立即显示“打开 MDX 文件”的不确定进度；后端在打开 MDX 前也先 emit `opening` 阶段，进入写入后 emit `indexing`，完成/失败 emit `done`/`error`。
+- 调整索引循环：改为按 `keyword_list()[i]` 克隆词头并 `fetch`，避免每个词头再次 `lookup` 二分查找；同时只索引英文单词类词头（ASCII 字母、撇号、连字符），跳过短语、数字、中文等不参与当前单词查询路由的词头，避免 ECDICT 超大 keyword 集合拖垮索引。
+- 新增词头过滤单元测试；重新验证：`npm run build`、`cargo check`、`cargo test` 通过。
 
 ## 待办
 - 运行 `npm run tauri:dev` 做真实桌面取词体验测试。
