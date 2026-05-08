@@ -16,7 +16,8 @@
 | 4. 开发路线图 | complete | 安排里程碑与验证顺序 | 分阶段开发计划 |
 | 5. 风险与验证清单 | complete | 列出高风险点和 PoC | 风险表与 PoC 建议 |
 | 6. MVP 工程实现 | complete | 搭建 Tauri + React + Tailwind + Rust MVP | 可编译的桌面应用骨架 |
-| 7. MDX-only 词典重构 | complete | 移除运行时 CSV 解析，改为内置/用户 MDX 索引 | MDX 词典服务、设置页 MDX 管理 |
+| 7. 词典运行时重构 | complete | 移除运行时 CSV 解析，改为内置 ECDICT SQLite + 用户 MDX 索引 | 内置 SQLite 查询、用户 MDX 管理 |
+| 8. 词典模块拆分 | complete | 拆分过长的 `dictionary.rs`，按职责维护词典逻辑 | `dictionary/` 子模块与瘦门面 |
 
 ## MVP 范围
 - 桌面端支持 macOS、Windows、主流 Linux 桌面环境。
@@ -44,7 +45,7 @@
 - UI：轻量组件库 + 自定义紧凑浮窗。
 - 存储：SQLite 或 sled；MVP 建议 SQLite。
 - 配置密钥：系统 Keychain/Credential Manager/Secret Service，短期可用 Tauri store + 加密兜底。
-- 词典格式：运行时只支持 MDX；ECDICT CSV/脚本仅作为上游源码或构建材料，发布包通过资源目录内置 ECDICT MDX。
+- 词典格式：内置 ECDICT 使用资源目录中的预构建 SQLite；用户导入只支持 MDX；ECDICT CSV/脚本仅作为上游源码或构建材料。
 - AI 接入：OpenAI-compatible client 抽象，预留 provider adapter。
 
 ## 验证优先级
@@ -68,6 +69,8 @@
 - 已实现剪贴板取词兜底：保存剪贴板、模拟复制、读取文本、恢复剪贴板。
 - 已实现本地示例词典查询和 OpenAI-compatible 翻译调用。
 - 已通过 `npm run build` 和 `cargo check`。
-- 已将词典运行时重构为 MDX-only：内置 ECDICT MDX 资源索引、用户 MDX 导入、安全文本展示、AI 学习卡片缓存；CSV 导入已移除。
-- 已为 MDX 导入和内置索引重建增加后台进度事件，并在设置页显示索引进度条。
-- 已修复索引初期无反馈问题：打开 MDX 文件阶段显示不确定进度，进入写入后显示条目进度；索引循环仅处理当前单词查询需要的英文词头。
+- 已将词典运行时重构为内置 ECDICT SQLite + 用户 MDX：内置词典直接只读查询资源目录中的 `ecdict.db`，用户 MDX 导入后写入应用 SQLite，CSV 导入已移除。
+- 已为用户 MDX 导入增加后台进度事件，并在设置页显示索引进度条。
+- 已修复用户 MDX 索引初期无反馈问题：打开 MDX 文件阶段显示不确定进度，进入写入后显示条目进度；索引循环仅处理当前单词查询需要的英文词头。
+- 已增加用户 MDX 索引单任务保护：后端保存当前索引进度并拒绝重复导入，设置页重新进入时先恢复运行中任务状态，避免重复触发索引和 SQLite `database is locked`。
+- 已将过长的 `src-tauri/src/dictionary.rs` 拆为 `dictionary/` 子模块：公开模型、错误、store/schema、内置 ECDICT SQLite、用户 MDX 导入、进度事件、文本清洗和 WordProfile 构建分离维护。

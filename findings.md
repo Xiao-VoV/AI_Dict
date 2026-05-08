@@ -20,7 +20,7 @@
 - 本地词典必须重视版权。建议优先使用可分发的开源词典，或让用户自行导入词典。
 - 数据层建议转换为 SQLite 表，并为英文单词建立规范化索引，例如小写、lemma、变形映射。
 - 单词判别不宜只靠空格数量，应结合语言检测、标点、token 数量和长度。
-- ECDICT 仓库中的 CSV/脚本是上游源码和构建材料，不应作为应用运行时解析格式；应用运行时词典收敛为内置/用户导入 MDX，并将 HTML 降级为安全文本展示。
+- ECDICT 仓库中的 CSV/脚本是上游源码和构建材料，不应作为应用运行时解析格式；内置 ECDICT 可直接使用上游预构建 SQLite，用户导入词典继续收敛为 MDX，并将 MDX HTML 降级为安全文本展示。
 
 ## AI 翻译策略
 - 支持 OpenAI-compatible API 可以覆盖 OpenAI、DeepSeek、Moonshot、通义千问兼容接口、Ollama/LM Studio 等。
@@ -43,8 +43,13 @@
 - 某些 OpenAI-compatible 服务会返回非标准响应，例如 `message.role` 为空字符串；`async-openai` 的强类型 `CreateChatCompletionResponse` 会因此反序列化失败。当前使用 `byot` feature 让库负责请求与鉴权，但用宽松响应结构只读取 `choices[].message.content`。
 - 使用 `tauri-plugin-log` 写 stdout 和系统日志目录，debug 构建默认 Debug 级别，release 构建默认 Info 级别。日志应避免记录 API Key 和完整原文，只记录长度、路由、模型、Base URL 等必要排障信息。
 - MDX 索引已经在后台线程执行，但真实大词典仍需要可见进度；当前通过 `dictionary-index-progress` Tauri event 从 Rust 后端推送索引进度，前端设置页监听后展示进度条。
-- 当前 MDX 读取使用 `rs-mdict = 0.1.1`，SQLite 写入使用 `rusqlite`。`rusqlite` 是成熟 SQLite 绑定；`rs-mdict` 能解析/查询 MDX，但版本早、生态成熟度有限，不应视为“成熟 MDX -> SQLite 转换器”。当前转换逻辑是应用自己写的：用 `rs-mdict` 读词头/释义，再用 `rusqlite` 写入自有表。
-- 现有 `src-tauri/resources/dicts/ecdict.mdx` 约 93MB，`rs-mdict` CLI 探针显示 3,402,564 个 keyword，`Encryption: KeyInfoBlock`。全量逐词头 `lookup` 会非常慢；索引时应尽量过滤当前单词查询不需要的词头，并长期考虑使用更成熟的离线构建链路预生成 SQLite。
+- 设置页组件卸载会丢失本地 `dictionaryBusy` 状态；如果后端没有全局索引任务状态，用户返回首页再进入设置页后可能再次发起重建/导入，第二个任务会和上一轮 SQLite 写事务抢锁，并让 `list_dictionaries` 报 `database is locked`。当前已在后端增加进程内单任务锁和 `get_dictionary_index_progress` 状态查询，前端进入设置页时先恢复运行中的进度，完成后再刷新词典列表。
+- 当前 `src-tauri/resources/dicts/ecdict.db` 是 ECDICT 预构建 SQLite，表名为 `stardict`，字段包含 `word`、`sw`、`phonetic`、`definition`、`translation`、`exchange`、`tag` 等，并且 `word` / `sw` 有索引；条目数为 3,402,564。内置词典可以直接只读查询该数据库，不需要再从内置 MDX 转换到应用 SQLite。
+- 用户 MDX 读取使用 `rs-mdict = 0.1.1`，应用 SQLite 写入使用 `rusqlite`。`rusqlite` 是成熟 SQLite 绑定；`rs-mdict` 能解析/查询 MDX，但版本早、生态成熟度有限，不应视为“成熟 MDX -> SQLite 转换器”。用户 MDX 转换逻辑是应用自己写的：用 `rs-mdict` 读词头/释义，再用 `rusqlite` 写入自有表。
+- 现有 `src-tauri/resources/dicts/ecdict.mdx` 约 93MB，`rs-mdict` CLI 探针显示 3,402,564 个 keyword，`Encryption: KeyInfoBlock`。全量逐词头 `lookup` 会非常慢；内置 ECDICT 已改用预构建 `ecdict.db` 直接查询，不再需要用户现场重建内置 MDX 索引。
+- `dictionary.rs` 原先约 1365 行，混合了公开类型、数据库 schema、内置 ECDICT SQLite 查询、用户 MDX 导入、索引进度、HTML 安全文本清洗、WordProfile 构建和单元测试。现在按职责拆到 `src-tauri/src/dictionary/` 子模块，主文件约 211 行，仅作为对外 API 门面和测试入口。
+- 词典模块拆分后的职责边界：`store.rs` 管理应用 SQLite schema/AI 卡片/词典列表删除；`builtin.rs` 管理内置 ECDICT SQLite 注册、刷新和查询；`import.rs` 管理用户 MDX 后台索引；`progress.rs` 管理索引事件和单任务状态；`profile.rs` 管理展示模型构建和 ECDICT metadata 解析；`text.rs` 管理 MDX 文本清洗和词头过滤。
+- ECDICT 的 `translation` 和 `definition` 会被合并到 `ImportedCard.plain_text` 供词典详情展示；这个文本不能直接作为 `WordProfile.translated` 的兜底，否则会把英文 definition、音标、exchange、tag 等多余信息显示在“译文”卡片里。单词译文兜底应优先使用 AI 返回值，其次只选本地词典中的中文释义，最后才回退到 lemma。
 
 ## 参考来源
 - Tauri global-shortcut 插件文档：https://v2.tauri.app/zh-cn/plugin/global-shortcut/

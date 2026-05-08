@@ -65,7 +65,7 @@ export function HomePage({
 
             <section className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] gap-4 p-5">
                 <div className="rounded-lg border border-line bg-white/78 p-4 shadow-sm">
-                    <div className="mt-3 flex justify-between py-4">
+                    <div className="flex justify-between p-3">
                         <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink">
                             <Search className="h-4 w-4" />
                             {t.manualTest}
