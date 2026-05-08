@@ -49,7 +49,7 @@ function WordResult({
   return (
     <div className="space-y-4">
       <div className="grid gap-3 sm:grid-cols-2">
-        <div className="rounded-md bg-white p-3 ring-1 ring-line">
+        <div className="rounded-md bg-white p-3 ring-1 ring-line sm:col-span-2">
           <p className="mb-1 text-xs font-semibold text-amber">{t.translation}</p>
           <p className="text-xl font-semibold text-ink">{profile.translated}</p>
         </div>
@@ -57,8 +57,6 @@ function WordResult({
           <p className="mb-1 text-xs font-semibold text-moss">{t.wordBaseForm}</p>
           <p className="text-base font-medium text-ink">{profile.lemma}</p>
         </div>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2">
         <div className="rounded-md bg-paper p-3">
           <p className="mb-1 text-xs font-semibold text-moss">Phonetic</p>
           <p className="text-base font-medium text-ink">

@@ -2,6 +2,8 @@
 
 基于 Tauri v2 + React + TypeScript + Tailwind CSS 的跨平台划词翻译 MVP。
 
+![alt text](images/image.png)
+
 ## 当前 MVP 能力
 
 - `Cmd/Ctrl + Shift + E` 全局快捷键触发读取当前选中文本。

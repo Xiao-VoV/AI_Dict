@@ -77,6 +77,7 @@
 - 修复结果面板展示问题：单词结果和句子翻译结果不再显示“原文”卡片，只保留译文/原型/音标/词典详情等有效信息。
 - 修复单词译文兜底过长问题：当 AI 没返回译文时，后端不再把 ECDICT 整段安全文本放进 `translated`，而是只从本地词典中提取第一条中文释义；新增 `translated_fallback_uses_only_local_chinese_definition` 回归测试覆盖 `world` 场景。
 - 重新验证：`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml`、`cargo check --manifest-path src-tauri/Cargo.toml` 通过。
+- 调整单词结果顶部布局：译文卡片占满两列，单词原型和 Phonetic 放在译文下方左右两列；重新验证 `npm run build` 通过。
 
 ## 待办
 - 运行 `npm run tauri:dev` 做真实桌面取词体验测试。
