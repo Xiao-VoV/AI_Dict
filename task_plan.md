@@ -17,6 +17,7 @@
 | 5. 风险与验证清单 | complete | 列出高风险点和 PoC | 风险表与 PoC 建议 |
 | 6. MVP 工程实现 | complete | 搭建 Tauri + React + Tailwind + Rust MVP | 可编译的桌面应用骨架 |
 | 7. 词典运行时重构 | complete | 移除运行时 CSV 解析，改为内置 ECDICT SQLite + 用户 MDX 索引 | 内置 SQLite 查询、用户 MDX 管理 |
+| 8. 词典模块拆分 | complete | 拆分过长的 `dictionary.rs`，按职责维护词典逻辑 | `dictionary/` 子模块与瘦门面 |
 
 ## MVP 范围
 - 桌面端支持 macOS、Windows、主流 Linux 桌面环境。
@@ -72,3 +73,4 @@
 - 已为用户 MDX 导入增加后台进度事件，并在设置页显示索引进度条。
 - 已修复用户 MDX 索引初期无反馈问题：打开 MDX 文件阶段显示不确定进度，进入写入后显示条目进度；索引循环仅处理当前单词查询需要的英文词头。
 - 已增加用户 MDX 索引单任务保护：后端保存当前索引进度并拒绝重复导入，设置页重新进入时先恢复运行中任务状态，避免重复触发索引和 SQLite `database is locked`。
+- 已将过长的 `src-tauri/src/dictionary.rs` 拆为 `dictionary/` 子模块：公开模型、错误、store/schema、内置 ECDICT SQLite、用户 MDX 导入、进度事件、文本清洗和 WordProfile 构建分离维护。
